@@ -1,0 +1,1843 @@
+/** 
+ * Jolly-Seber individual log likelihoods and marginal log likelihoods of entry
+ * occasions for observed individuals, and log likelihoods associated with
+ * unseen augmented individual(s). Function is overloaded (first is much faster 
+ * without individual effects):
+ *  1. log_phi and logit_p per survey with one augmented log likelihood 
+ *     computation
+ *  2. log_phi and logit_p per individual and survey with log likelihood 
+ *     computations for each augmented individual
+ * 
+ * @param y         Detection history [I, J]
+ * @param f_l       First and last survey detected [I, 2]
+ * @param log_phi   Log survival probabilities [(I + I_aug, ), J - 1]
+ * @param logit_p   Detection logits [(I + I_aug, ), J]
+ * @param log_beta  Log entry probabilities [J]
+ * @param psi       Inclusion probability
+ *
+ * @return log_lik   Individual log likelihoods of observed [I]
+ * @return log_lik0  Inclusion state log likelihoods of augmented [2(, I_aug)]
+ * @return lp_b      Marginal entry log likelihoods of observed [J, I]
+ * @return lp_b0     Marginal entry log likelihoods of augmented [J(, I_aug)]
+ */
+tuple(vector, vector, matrix, vector) 
+  js(data array[,] int y, data array[,] int f_l, vector log_phi, vector logit_p,
+     vector log_beta, real psi) {
+  int I = size(y), J = size(y[1]), Jm1 = J - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  vector[J] log_1mp = log1m_inv_logit(logit_p),
+            log_p = log_1mp + logit_p;
+  vector[Jm1] rev_log_1mp_phi = reverse(log_1mp[:Jm1] + log_phi),
+              log_phi_1mp = cumulative_sum(log_phi + log_1mp[2:]);
+  matrix[J, J] beta_not_p = rep_matrix(log_beta, J);
+  matrix[J, Jm1] phi_not_p;
+  phi_not_p[2:] = rep_matrix(log_phi_1mp, Jm1);
+  for (f in 2:Jm1) {
+    int fm1 = f - 1, fp1 = f + 1;
+    beta_not_p[:fm1, f] += reverse(cumulative_sum(tail(rev_log_1mp_phi, fm1)));
+    phi_not_p[fp1:, f] -= log_phi_1mp[fm1];
+  }
+  beta_not_p[:Jm1, J] += reverse(cumulative_sum(rev_log_1mp_phi));
+  vector[Jm1] log_chi;
+  for (l in 1:Jm1) {
+    int lp1 = l + 1;
+    log_chi[l] = log1m_exp(log_sum_exp(phi_not_p[lp1:, l] + logit_p[lp1:]));
+  }
+  matrix[J, I] lp_b;
+  vector[I] log_lik = log_psi + log_p[f_l[:, 1]];
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2];
+    lp_b[:f, i] = beta_not_p[:f, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]);
+    if (f < l) {
+      int fp1 = f + 1;
+      log_lik[i] += phi_not_p[l, f]
+                    + dot_product(to_vector(y[i, fp1:l]), logit_p[fp1:l]);
+    }
+    if (l < J) {
+      log_lik[i] += log_chi[l];
+    }
+  }
+  vector[J] lp_b0 = log_beta + log_1mp;
+  lp_b0[:Jm1] += log_chi;
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0);
+}
+
+tuple(vector, matrix, matrix, matrix) 
+  js(data array[,] int y, data array[,] int f_l, matrix log_phi, matrix logit_p, 
+     vector log_beta, real psi) {
+  int I = size(y), I_all = cols(log_phi), I_aug = I_all - I, J = size(y[1]),
+      Jm1 = J - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  vector[Jm1] log_phi_i, log_phi_1mp;
+  vector[J] logit_p_i, log_1mp;
+  matrix[J, I] lp_b = rep_matrix(log_beta, I);
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2];
+    log_phi_i = log_phi[:, i];
+    logit_p_i = logit_p[:, i];
+    log_1mp = log1m_inv_logit(logit_p_i);
+    if (f > 1) {
+      int fm1 = f - 1;
+      lp_b[:fm1, i] += reverse(cumulative_sum(reverse(log_phi_i[:fm1] 
+                                                      + log_1mp[:fm1])));
+    }
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[f] + logit_p_i[f];
+    if (f < J) {
+      int fp1 = f + 1;
+      log_phi_1mp[f:] = log_phi_i[f:] + log_1mp[fp1:];
+      if (f < l) {
+        log_lik[i] += sum(log_phi_1mp[f:l - 1]
+                          + to_vector(y[i, fp1:l]) .* logit_p_i[fp1:l]);
+      }
+      if (l < J) {
+        int lp1 = l + 1;
+        log_lik[i] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[l:])
+                                            + logit_p_i[l + 1:]));
+      }
+    }
+  }
+  matrix[J, I_aug] lp_b0 = rep_matrix(log_beta, I_aug);
+  matrix[2, I_aug] log_lik0 = rep_matrix([ log_1mpsi, log_psi ]', I_aug);
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    logit_p_i = logit_p[:, ii];
+    log_1mp = log1m_inv_logit(logit_p_i);
+    lp_b0[:, i] += log_1mp;
+    log_phi_1mp = log_phi[:, ii] + log_1mp[2:];
+    for (b in 1:Jm1) {
+      lp_b0[b, i] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[b:])
+                                           + logit_p_i[b + 1:]));
+    }
+    log_lik0[2, i] += log_sum_exp(lp_b0[:, i]);
+  }
+  return (log_lik, log_lik0, lp_b, lp_b0);
+}
+
+/** 
+ * As js() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(vector, vector, matrix, vector) 
+  js2(data array[,] int y, data array[,] int f_l, matrix log_phi, matrix logit_p, 
+      vector log_beta, real psi) {
+  int I = size(y), Ip1 = I + 1, J = size(y[1]), Jm1 = J - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  vector[Jm1] log_phi_i, log_phi_1mp;
+  vector[J] logit_p_i, log_1mp;
+  matrix[J, I] lp_b = rep_matrix(log_beta, I);
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2];
+    log_phi_i = log_phi[:, i];
+    logit_p_i = logit_p[:, i];
+    log_1mp = log1m_inv_logit(logit_p_i);
+    if (f > 1) {
+      int fm1 = f - 1;
+      lp_b[:fm1, i] += reverse(cumulative_sum(reverse(log_phi_i[:fm1] 
+                                                      + log_1mp[:fm1])));
+    }
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[f] + logit_p_i[f];
+    if (f < J) {
+      int fp1 = f + 1;
+      log_phi_1mp[f:] = log_phi_i[f:] + log_1mp[fp1:];
+      if (f < l) {
+        log_lik[i] += sum(log_phi_1mp[f:l - 1]
+                          + to_vector(y[i, fp1:l]) .* logit_p_i[fp1:l]);
+      }
+      if (l < J) {
+        int lp1 = l + 1;
+        log_lik[i] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[l:])
+                                            + logit_p_i[lp1:]));
+      }
+    }
+  }
+  logit_p_i = logit_p[:, Ip1];
+  log_1mp = log1m_inv_logit(logit_p_i);
+  log_phi_1mp = log_phi[:, Ip1] + log_1mp[2:];
+  vector[J] lp_b0 = log_beta + log_1mp;
+  for (b in 1:Jm1) {
+    lp_b0[b] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[b:])
+                                      + logit_p_i[b + 1:]));
+  }
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0);
+}
+
+/** 
+ * Robust design Jolly-Seber individual log likelihoods and marginal log 
+ * likelihoods of entry occasions for observed individuals, and log likelihoods
+ * associated with unseen augmented individual(s). Function is overloaded 
+ * (first is much faster without individual effects):
+ *  1. log_phi and logit_p per survey/secondary with one augmented log 
+ *     likelihood computation
+ *  2. log_phi and logit_p per individual and survey/secondary with log 
+ *     likelihood computations for each augmented individual
+ * 
+ * @param y         Detection history [I, J, K_max]
+ * @param f_l       First and last survey detected [I, 2]
+ * @param K         Number of secondaries per survey [J]
+ * @param log_phi   Log survival probabilities [(I + I_aug, ), J - 1]
+ * @param logit_p   Detection logits [(I + I_aug, )K_max, J]
+ * @param log_beta  Log entry probabilities [J]
+ * @param psi       Inclusion probability
+ *
+ * @return log_lik   Individual log likelihoods of observed [I]
+ * @return log_lik0  Inclusion state log likelihoods of augmented [2(, I_aug)]
+ * @return lp_b      Marginal entry log likelihoods of observed [J, I]
+ * @return lp_b0     Marginal entry log likelihoods of augmented [J(, I_aug)]
+ */
+tuple(vector, vector, matrix, vector) 
+  js_rd(data array[,,] int y, data array[,] int f_l, data array[] int K, 
+        vector log_phi, matrix logit_p, vector log_beta, real psi) {
+  int I = size(y), J = size(y[1]), Jm1 = J - 1, K_max = max(K);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  vector[J] log_1mp, log_p;
+  for (j in 1:J) {
+    log_1mp[j] = sum(log1m_inv_logit(logit_p[:K[j], j]));
+  }
+  log_p = log1m_exp(log_1mp);
+  vector[Jm1] rev_log_1mp_phi = reverse(log_1mp[:Jm1] + log_phi),
+              log_phi_1mp = cumulative_sum(log_phi + log_1mp[2:]);
+  matrix[J, J] beta_not_p = rep_matrix(log_beta, J);
+  matrix[J, Jm1] phi_not_p;
+  phi_not_p[2:] = rep_matrix(log_phi_1mp, Jm1);
+  for (f in 2:Jm1) {
+    int fm1 = f - 1, fp1 = f + 1;
+    beta_not_p[:fm1, f] += reverse(cumulative_sum(tail(rev_log_1mp_phi, fm1)));
+    phi_not_p[fp1:, f] -= log_phi_1mp[fm1];
+  }
+  beta_not_p[:Jm1, J] += reverse(cumulative_sum(rev_log_1mp_phi));
+  vector[Jm1] log_chi;
+  for (l in 1:Jm1) {
+    int lp1 = l + 1;
+    log_chi[l] = log1m_exp(log_sum_exp(phi_not_p[lp1:, l] - log_1mp[lp1:] 
+                                       + log_p[lp1:]));
+  }
+  matrix[J, I] lp_b;
+  vector[I] log_lik = log_psi + log_1mp[f_l[:, 1]];
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], K_f = K[f];
+    lp_b[:f, i] = beta_not_p[:f, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) 
+                  + dot_product(to_vector(y[i, f, :K_f]), logit_p[:K_f, f]);
+    if (f < l) {
+      int fp1 = f + 1;
+      log_lik[i] += phi_not_p[l, f];
+      for (j in f + 1:l) {
+        int K_j = K[j];
+        log_lik[i] += dot_product(to_vector(y[i, j, :K_j]), logit_p[:K_j, j]);
+      }
+    }
+    if (l < J) {
+      log_lik[i] += log_chi[l];
+    }
+  }
+  vector[J] lp_b0 = log_beta + log_1mp;
+  lp_b0[:Jm1] += log_chi;
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0);
+}
+
+tuple(vector, matrix, matrix, matrix) 
+  js_rd(data array[,,] int y, data array[,] int f_l, data array[] int K, 
+        matrix log_phi, array[] matrix logit_p, vector log_beta, real psi) {
+  int I = size(y), I_all = cols(log_phi), I_aug = I_all - I, J = size(y[1]), 
+      Jm1 = J - 1, K_max = max(K);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  vector[Jm1] log_phi_i;
+  matrix[K_max, J] logit_p_i;
+  vector[J] log_1mp;
+  vector[Jm1] log_phi_1mp;
+  matrix[J, I] lp_b = rep_matrix(log_beta, I);
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], K_f = K[f];
+    log_phi_i = log_phi[:, i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+    }
+    if (f > 1) {
+      int fm1 = f - 1;
+      lp_b[:fm1, i] += reverse(cumulative_sum(reverse(log_phi_i[:fm1] 
+                                                      + log_1mp[:fm1])));
+    }
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[f]
+                  + dot_product(to_vector(y[i, f, :K_f]), logit_p[i, :K_f, f]);
+    if (f < J) {
+      int fp1 = f + 1;
+      log_phi_1mp[f:] = log_phi_i[f:] + log_1mp[fp1:];
+      if (f < l) {
+        log_lik[i] += sum(log_phi_1mp[f:l - 1]);
+        for (j in fp1:l) {
+          int K_j = K[j];
+          log_lik[i] += dot_product(to_vector(y[i, j, :K_j]), 
+                                    logit_p_i[:K_j, j]);
+        }
+      }
+      if (l < J) {
+        int lp1 = l + 1;
+        log_lik[i] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[l:])
+                                            - log_1mp[lp1:] 
+                                            + log1m_exp(log_1mp[lp1:])));
+       }
+    }
+  }
+  matrix[J, I_aug] lp_b0 = rep_matrix(log_beta, I_aug);
+  matrix[2, I_aug] log_lik0 = rep_matrix([ log_1mpsi, log_psi ]', I_aug);
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    log_phi_i = log_phi[:, ii];
+    logit_p_i = logit_p[ii];
+    for (j in 1:J) {
+      log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+    }
+    lp_b0[:, i] += log_1mp;
+    log_phi_1mp = log_phi_i + log_1mp[2:];
+    for (b in 1:Jm1) {
+      int bp1 = b + 1;
+      lp_b0[b, i] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[b:])
+                                           - log_1mp[bp1:] 
+                                           + log1m_exp(log_1mp[bp1:])));
+    }
+    log_lik0[2, i] += log_sum_exp(lp_b0[:, i]);
+  }
+  return (log_lik, log_lik0, lp_b, lp_b0);
+}
+
+/** 
+ * As js_rd2() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(vector, vector, matrix, vector) 
+  js_rd2(data array[,,] int y, data array[,] int f_l, data array[] int K, 
+         matrix log_phi, array[] matrix logit_p, vector log_beta, real psi) {
+  int I = size(y), Ip1 = I + 1, J = size(y[1]), Jm1 = J - 1, K_max = max(K);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  vector[Jm1] log_phi_i;
+  matrix[K_max, J] logit_p_i;
+  vector[J] log_1mp;
+  vector[Jm1] log_phi_1mp;
+  matrix[J, I] lp_b = rep_matrix(log_beta, I);
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], K_f = K[f];
+    log_phi_i = log_phi[:, i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+    }
+    if (f > 1) {
+      int fm1 = f - 1;
+      lp_b[:fm1, i] += reverse(cumulative_sum(reverse(log_phi_i[:fm1] 
+                                                      + log_1mp[:fm1])));
+    }
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[f]
+                  + dot_product(to_vector(y[i, f, :K_f]), logit_p_i[:K_f, f]);
+    if (f < J) {
+      int fp1 = f + 1;
+      log_phi_1mp[f:] = log_phi_i[f:] + log_1mp[fp1:];
+      if (f < l) {
+        log_lik[i] += sum(log_phi_1mp[f:l - 1]);
+        for (j in fp1:l) {
+          int K_j = K[j];
+          log_lik[i] += dot_product(to_vector(y[i, j, :K_j]), 
+                                    logit_p_i[:K_j, j]);
+        }
+      }
+      if (l < J) {
+        int lp1 = l + 1;
+        log_lik[i] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[l:])
+                                            - log_1mp[lp1:] 
+                                            + log1m_exp(log_1mp[lp1:])));
+       }
+    }
+  }
+  logit_p_i = logit_p[Ip1];
+  for (j in 1:J) {
+    log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+  }
+  vector[J] log_p = log1m_exp(log_1mp);
+  log_phi_1mp = log_phi[:, Ip1] + log_1mp[2:];
+  vector[J] lp_b0 = log_beta + log_1mp;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    lp_b0[b] += log1m_exp(log_sum_exp(cumulative_sum(log_phi_1mp[b:])
+                                      - log_1mp[bp1:] 
+                                      + log1m_exp(log_1mp[bp1:])));
+    
+  }
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0);
+}
+
+/** 
+ * Multistate Jolly-Seber individual log likelihoods and marginal log 
+ * likelihoods of entry occasions and entry states for observed individuals, 
+ * and log likelihoods associated with unseen augmented individual(s). Function 
+ * is overloaded (first is much faster without individual effects):
+ *  1. log_H and logit_p per survey with one augmented log likelihood 
+ *     computation
+ *  2. log_H and logit_p per individual and survey with log likelihood 
+ *     computations for each augmented individual
+ * 
+ * @param y         Detection history [I, J]
+ * @param f_l       First and last survey detected [I, 2]
+ * @param log_H     Log transition matrices [(I + I_aug, )J - 1, S, S]
+ * @param logit_p   Detection logits [(I + I_aug, )J, S, S]
+ * @param log_eta   Log entry state probabilities [(I + I_aug, )S, J]
+ * @param psi       Inclusion probability
+ *
+ * @return log_lik   Individual log likelihoods of observed [I]
+ * @return log_lik0  Inclusion state log likelihoods of augmented [2(, I_aug)]
+ * @return lp_b      Marginal entry log likelihoods of observed [J, I]
+ * @return lp_b0     Marginal entry log likelihoods of augmented [J(, I_aug)]
+ * @return lp_a      Marginal entry state log likelihoods of observed [I, S, J]
+ * @return lp_a0     Marginal entry state log likelihoods of augmented [(I_aug, ), S,]
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_ms(data array[,] int y, data array[,] int f_l, array[] matrix log_H, 
+        matrix logit_p, vector log_beta, matrix log_eta, real psi) {
+  int I = size(y), J = size(y[1]), Jm1 = J - 1, S = rows(log_H[1]);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  matrix[S, J] log_1mp = log1m_inv_logit(logit_p),
+               log_eta_1mp = log_eta + log_1mp,
+               log_p = log_1mp + logit_p;
+  array[Jm1, S] matrix[S, Jm1] beta_not_p;
+  for (b in 1:Jm1) {
+    for (a in 1:S) {
+      beta_not_p[b, a, :, b] = rep_vector(negative_infinity(), S);
+      beta_not_p[b, a, a, b] = log_beta[b] + log_eta_1mp[a, b];
+      for (j in b + 1:Jm1) {
+        int jm1 = j - 1;
+        beta_not_p[b, a, :, j] = log_prod_exp(log_H[jm1]', 
+                                              beta_not_p[b, a, :, jm1])
+                                 + log_1mp[:, j];
+      }
+    }
+  }
+  vector[S] Omega;
+  vector[Jm1] log1m_chi;
+  matrix[S, Jm1] log_chi;
+  for (l in 1:Jm1) {
+    int lp1 = l + 1;
+    for (s in 1:S) {
+      Omega = log_H[l, s]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega + logit_p[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega + logit_p[:, jp1]);
+      }
+      log_chi[s, l] = log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  array[J] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1;
+    y_i[f:l] = y[i, f:l];
+    int y_j = y_i[f];
+    for (b in 1:fm1) {
+      for (a in 1:S) {
+        lp_a[i, a, b] = log_sum_exp(beta_not_p[b, a, :, fm1] 
+                                    + log_H[fm1, :, y_j]);
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    lp_b[f, i] = log_beta[f] + log_eta[y_j, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_p[y_j, f];
+    if (f < l) {
+      Omega = rep_vector(negative_infinity(), S);
+      Omega[y_j] = 0;
+      for (j in f + 1:l) {
+        int jm1 = j - 1, y_jm1 = y_j;
+        y_j = y_i[j];
+        if (y_j) {
+          real lp_j = y_jm1 ?
+                      Omega[y_jm1] + log_H[jm1, y_jm1, y_j]
+                      : log_sum_exp(Omega + log_H[jm1, :, y_j]);
+          Omega = rep_vector(negative_infinity(), S);
+          Omega[y_j] = lp_j + log_p[y_j, j];
+        } else {
+          Omega = y_jm1 ?
+                  Omega[y_jm1] + log_H[jm1, y_jm1]'
+                  : log_prod_exp(log_H[jm1]', Omega);
+          Omega += log_1mp[:, j];
+        }
+      }
+      log_lik[i] += Omega[y_j];
+    }
+    if (l < J) {
+      log_lik[i] += log_chi[y_j, l];
+    }
+  }
+  matrix[S, J] lp_a0 = log_eta_1mp;
+  vector[J] lp_b0 = log_beta;
+  for (j in 1:Jm1) {
+    lp_b0[j] += log_sum_exp(lp_a0[:, j] + log_chi[:, j]);
+  }
+  lp_b0[J] += log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+tuple(vector, matrix, matrix, matrix, array[] matrix, array[] matrix)
+  js_ms(data array[,] int y, data array[,] int f_l, array[,] matrix log_H,
+        array[] matrix logit_p, vector log_beta, array[] matrix log_eta, 
+        real psi) {
+  int I = size(y), I_all = size(log_H), I_aug = I_all - I, J = size(y[1]), 
+      Jm1 = J - 1, S = rows(log_H[1, 1]);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[S, S] log_H_i;
+  matrix[S, J] logit_p_i, log_1mp, log_eta_i;
+  vector[S] Omega;
+  vector[Jm1] log1m_chi;
+  array[J] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    log_1mp = log1m_inv_logit(logit_p_i);
+    log_eta_i = log_eta[i];
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1;
+    y_i[f:l] = y[i, f:l];
+    int y_j = y_i[f];
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      if (bp1 == f) {
+        lp_a[i, :, b] = log_eta_i[:, b] + log_1mp[:, b];
+        lp_b[b, i] = log_beta[b] 
+                     + log_sum_exp(lp_a[i, :, b] + log_H_i[b, :, y_j]);
+      } else {
+        for (s in 1:S) {
+          Omega = log_beta[b] + log_eta_i[s, b] + log_1mp[s, b] 
+                  + log_H_i[b, s]' + log_1mp[:, bp1];
+          for (j in bp1 + 1:fm1) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, s, b] = log_sum_exp(Omega + log_H_i[fm1, :, y_j]);
+        }
+        lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+      }
+    }
+    lp_b[f, i] = log_beta[f] + log_eta_i[y_j, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[y_j, f] 
+                  + logit_p_i[y_j, f];
+    if (f < l) {
+      Omega = rep_vector(negative_infinity(), S);
+      Omega[y_j] = 0;
+      for (j in f + 1:l) {
+        int jm1 = j - 1, y_jm1 = y_j;
+        y_j = y_i[j];
+        if (y_j) {
+          real lp_j = y_jm1 ?
+                      Omega[y_jm1] + log_H_i[jm1, y_jm1, y_j]
+                      : log_sum_exp(Omega + log_H_i[jm1, :, y_j]);
+          Omega = rep_vector(negative_infinity(), S);
+          Omega[y_j] = lp_j + log_1mp[y_j, j] + logit_p_i[y_j, j];
+        } else {
+          Omega = y_jm1 ?
+                  Omega[y_jm1] + log_H_i[jm1, y_jm1]'
+                  : log_prod_exp(log_H_i[jm1]', Omega);
+          Omega += log_1mp[:, j];
+        }
+      }
+      log_lik[i] += Omega[y_j];
+    }
+    if (l < J) {
+      int lp1 = l + 1;
+      Omega = log_H_i[l, y_j]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega + logit_p_i[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega + logit_p_i[:, jp1]);
+      }
+      log_lik[i] += log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  array[I_aug] matrix[S, J] lp_a0 = rep_array(rep_matrix(log_beta', S), I_aug);
+  matrix[J, I_aug] lp_b0;
+  matrix[2, I_aug] log_lik0 = rep_matrix([ log_1mpsi, log_psi ]', I_aug);
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    log_H_i = log_H[ii];
+    logit_p_i = logit_p[ii];
+    log_1mp = log1m_inv_logit(logit_p_i);
+    lp_a0[i] += log_eta[ii] + log_1mp;
+    for (b in 1:Jm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega = log_H_i[b, a]' + log_1mp[:, bp1];
+        log1m_chi[b] = log_sum_exp(Omega + logit_p_i[:, bp1]);
+        for (j in bp1:Jm1) {
+          int jp1 = j + 1;
+          Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+          log1m_chi[j] = log_sum_exp(Omega + logit_p_i[:, jp1]);
+        }
+        lp_a0[i, a, b] += log1m_exp(log_sum_exp(log1m_chi[b:]));
+      }
+    }
+    for (b in 1:J) {
+      lp_b0[b, i] = log_sum_exp(lp_a0[i, :, b]);
+    }
+    log_lik0[2, i] += log_sum_exp(lp_b0[:, i]);
+  }
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+/** 
+ * As js_ms() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_ms2(data array[,] int y, data array[,] int f_l, array[,] matrix log_H,
+         array[] matrix logit_p, vector log_beta, array[] matrix log_eta, 
+         real psi) {
+  int I = size(y), Ip1 = I + 1, J = size(y[1]), Jm1 = J - 1,
+      S = rows(log_H[1, 1]);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[S, S] log_H_i;
+  matrix[S, J] logit_p_i, log_1mp, log_eta_i;
+  vector[S] Omega;
+  vector[Jm1] log1m_chi;
+  array[J] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    log_1mp = log1m_inv_logit(logit_p_i);
+    log_eta_i = log_eta[i];
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1;
+    y_i[f:l] = y[i, f:l];
+    int y_j = y_i[f];
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      if (bp1 == f) {
+        lp_a[i, :, b] = log_eta_i[:, b] + log_1mp[:, b];
+        lp_b[b, i] = log_beta[b] 
+                     + log_sum_exp(lp_a[i, :, b] + log_H_i[b, :, y_j]);
+      } else {
+        for (s in 1:S) {
+          Omega = log_beta[b] + log_eta_i[s, b] + log_1mp[s, b] 
+                  + log_H_i[b, s]' + log_1mp[:, bp1];
+          for (j in bp1 + 1:fm1) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, s, b] = log_sum_exp(Omega + log_H_i[fm1, :, y_j]);
+        }
+        lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+      }
+    }
+    lp_b[f, i] = log_beta[f] + log_eta_i[y_j, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[y_j, f] 
+                  + logit_p_i[y_j, f];
+    if (f < l) {
+      Omega = rep_vector(negative_infinity(), S);
+      Omega[y_j] = 0;
+      for (j in f + 1:l) {
+        int jm1 = j - 1, y_jm1 = y_j;
+        y_j = y_i[j];
+        if (y_j) {
+          real lp_j = y_jm1 ?
+                      Omega[y_jm1] + log_H_i[jm1, y_jm1, y_j]
+                      : log_sum_exp(Omega + log_H_i[jm1, :, y_j]);
+          Omega = rep_vector(negative_infinity(), S);
+          Omega[y_j] = lp_j + log_1mp[y_j, j] + logit_p_i[y_j, j];
+        } else {
+          Omega = y_jm1 ?
+                  Omega[y_jm1] + log_H_i[jm1, y_jm1]'
+                  : log_prod_exp(log_H_i[jm1]', Omega);
+          Omega += log_1mp[:, j];
+        }
+      }
+      log_lik[i] += Omega[y_j];
+    }
+    if (l < J) {
+      int lp1 = l + 1;
+      Omega = log_H_i[l, y_j]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega + logit_p_i[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega + logit_p_i[:, jp1]);
+      }
+      log_lik[i] += log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  log_H_i = log_H[Ip1];
+  logit_p_i = logit_p[Ip1];
+  log_1mp = log1m_inv_logit(logit_p_i);
+  matrix[S, Jm1] log_chi;
+  for (l in 1:Jm1) {
+    int lp1 = l + 1;
+    for (s in 1:S) {
+      Omega = log_H_i[l, s]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega + logit_p_i[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega + logit_p_i[:, jp1]);
+      }
+      log_chi[s, l] = log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  matrix[S, J] lp_a0 = log_eta[Ip1] + log_1mp;
+  vector[J] lp_b0 = log_beta;
+  for (j in 1:Jm1) {
+    lp_b0[j] += log_sum_exp(lp_a0[:, j] + log_chi[:, j]);
+  }
+  lp_b0[J] += log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+/** 
+ * Robust design multistate Jolly-Seber individual log likelihoods and marginal 
+ * log likelihoods of entry occasions and entry states for observed individuals, 
+ * and log likelihoods associated with unseen augmented individual(s). Function 
+ * is overloaded (first is much faster without individual effects):
+ *  1. log_H and logit_p per survey/secondary with one augmented 
+ *     log likelihood computation
+ *  2. log_H and logit_p per individual and survey/secondary with log 
+ *     likelihood computations for each augmented individual
+ * 
+ * @param y         Detection history [I, J, K_max]
+ * @param f_l       First and last survey detected [I, 2]
+ * @param K         Number of secondaries per survey [J]
+ * @param log_P     Log transition matrices [(I + I_aug, )J - 1, S, S]
+ * @param logit_p   Detection logits [(I + I_aug, )J, S, K_max]
+ * @param log_eta   Log entry state probabilities [(I + I_aug, )S, J]
+ * @param psi       Inclusion probability
+ *
+ * @return log_lik   Individual log likelihoods of observed [I]
+ * @return log_lik0  Inclusion state log likelihoods of augmented [2(, I_aug)]
+ * @return lp_b      Marginal entry log likelihoods of observed [J, I]
+ * @return lp_b0     Marginal entry log likelihoods of augmented [J(, I_aug)]
+ * @return lp_a      Marginal entry state log likelihoods of observed [I, S, J]
+ * @return lp_a0     Marginal entry state log likelihoods of augmented [(I_aug, ), S, J]
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_ms_rd(data array[,,] int y, data array[,] int f_l, data array[] int K,
+           array[] matrix log_H, array[] matrix logit_p, vector log_beta, 
+           matrix log_eta, real psi) {
+  int I = size(y), J = size(y[1]), Jm1 = J - 1, K_max = max(K), 
+      S = rows(log_H[1]);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  matrix[S, J] log_1mp, log_eta_1mp, log_p;
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p[j, s, :K_j]));
+    }
+  }
+  log_eta_1mp = log_eta + log_1mp;
+  log_p = log1m_exp(log_1mp);
+  array[Jm1, S] matrix[S, Jm1] beta_not_p;
+  for (b in 1:Jm1) {
+    for (a in 1:S) {
+      beta_not_p[b, a, :, b] = rep_vector(negative_infinity(), S);
+      beta_not_p[b, a, a, b] = log_beta[b] + log_eta_1mp[a, b];
+      for (j in b + 1:Jm1) {
+        int jm1 = j - 1;
+        beta_not_p[b, a, :, j] = log_prod_exp(log_H[jm1]', 
+                                              beta_not_p[b, a, :, jm1])
+                                 + log_1mp[:, j];
+      }
+    }
+  }
+  vector[S] Omega;
+  vector[Jm1] log1m_chi;
+  matrix[S, Jm1] log_chi;
+  for (l in 1:Jm1) {
+    int lp1 = l + 1;
+    for (s in 1:S) {
+      Omega = log_H[l, s]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega - log_1mp[:, lp1] + log_p[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega - log_1mp[:, jp1] + log_p[:, jp1]);
+      }
+      log_chi[s, l] = log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  array[J, K_max] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1;
+    y_i[f:l] = y[i, f:l];
+    int y_j = max(y_i[f]);
+    for (b in 1:fm1) {
+      for (a in 1:S) {
+        lp_a[i, a, b] = log_sum_exp(beta_not_p[b, a, :, fm1] 
+                                    + log_H[fm1, :, y_j]);
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    lp_b[f, i] = log_beta[f] + log_eta[y_j, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[y_j, f];
+    for (k in 1:K[f]) {
+      if (y_i[f, k]) {
+        log_lik[i] += logit_p[f, y_j, k];
+      }
+    }
+    if (f < l) {
+      Omega = rep_vector(negative_infinity(), S);
+      Omega[y_j] = 0;
+      for (j in f + 1:l) {
+        int jm1 = j - 1, y_jm1 = y_j;
+        y_j = max(y_i[j]);
+        if (y_j) {
+          real lp_j = y_jm1 ?
+                      Omega[y_jm1] + log_H[jm1, y_jm1, y_j]
+                      : log_sum_exp(Omega + log_H[jm1, :, y_j]);
+          Omega = rep_vector(negative_infinity(), S);
+          Omega[y_j] = lp_j + log_1mp[y_j, j];
+          for (k in 1:K[j]) {
+            if (y_i[j, k]) {
+              Omega[y_j] += logit_p[j, y_j, k];
+            }
+          }
+        } else {
+          Omega = y_jm1 ?
+                  Omega[y_jm1] + log_H[jm1, y_jm1]'
+                  : log_prod_exp(log_H[jm1]', Omega);
+          Omega += log_1mp[:, j];
+        }
+      }
+      log_lik[i] += Omega[y_j];
+    }
+    if (l < J) {
+      log_lik[i] += log_chi[y_j, l];
+    }
+  }
+  matrix[S, J] lp_a0 = log_eta_1mp;
+  vector[J] lp_b0 = log_beta;
+  for (j in 1:Jm1) {
+    lp_b0[j] += log_sum_exp(lp_a0[:, j] + log_chi[:, j]);
+  }
+  lp_b0[J] += log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+tuple(vector, matrix, matrix, matrix, array[] matrix, array[] matrix)
+  js_ms_rd(data array[,,] int y, data array[,] int f_l, data array[] int K, 
+           array[,] matrix log_H, array[,] matrix logit_p, vector log_beta, 
+           array[] matrix log_eta, real psi) {
+  int I = size(y), I_all = size(log_H), I_aug = I_all - I, J = size(y[1]), 
+      Jm1 = J - 1, K_max = max(K), S = rows(log_H[1, 1]);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[S, S] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  matrix[S, J] log_1mp, log_p, log_eta_i;
+  vector[S] Omega;
+  vector[Jm1] log1m_chi;
+  array[J, K_max] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    log_p = log1m_exp(log_1mp);
+    log_eta_i = log_eta[i];
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1;
+    y_i[f:l] = y[i, f:l];
+    int y_j = max(y_i[f]);
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      if (bp1 == f) {
+        lp_a[i, :, b] = log_eta_i[:, b] + log_1mp[:, b];
+        lp_b[b, i] = log_beta[b] + log_sum_exp(lp_a[i, :, b] 
+                     + log_H_i[b, :, y_j]);
+      } else {
+        for (s in 1:S) {
+          Omega = log_beta[b] + log_eta_i[s, b] + log_1mp[s, b]
+                  + log_H_i[b, s]' + log_1mp[:, bp1];
+          for (j in bp1 + 1:fm1) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, s, b] = log_sum_exp(Omega + log_H_i[fm1, :, y_j]);
+        }
+        lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+      }
+    }
+    lp_b[f, i] = log_beta[f] + log_eta_i[y_j, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[y_j, f];
+    for (k in 1:K[f]) {
+      if (y_i[f, k]) {
+        log_lik[i] += logit_p_i[f, y_j, k];
+      }
+    }
+    if (f < l) {
+      Omega = rep_vector(negative_infinity(), S);
+      Omega[y_j] = 0;
+      for (j in f + 1:l) {
+        int jm1 = j - 1, y_jm1 = y_j;
+        y_j = max(y_i[j]);
+        if (y_j) {
+          real lp_j = y_jm1 ?
+                      Omega[y_jm1] + log_H_i[jm1, y_jm1, y_j]
+                      : log_sum_exp(Omega + log_H_i[jm1, :, y_j]);
+          Omega = rep_vector(negative_infinity(), S);
+          Omega[y_j] = lp_j + log_1mp[y_j, j];
+          for (k in 1:K[j]) {
+            if (y_i[j, k]) {
+              Omega[y_j] += logit_p_i[j, y_j, k];
+            }
+          }
+        } else {
+          Omega = y_jm1 ?
+                  Omega[y_jm1] + log_H_i[jm1, y_jm1]'
+                  : log_prod_exp(log_H_i[jm1]', Omega);
+          Omega += log_1mp[:, j];
+        }
+      }
+      log_lik[i] += Omega[y_j];
+    }
+    if (l < J) {
+      int lp1 = l + 1;
+      Omega = log_H_i[l, y_j]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega - log_1mp[:, lp1] + log_p[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega - log_1mp[:, jp1] + log_p[:, jp1]);
+      }
+      log_lik[i] += log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  array[I_aug] matrix[S, J] lp_a0 = rep_array(rep_matrix(log_beta', S), I_aug);
+  matrix[J, I_aug] lp_b0;
+  matrix[2, I_aug] log_lik0 = rep_matrix([ log_1mpsi, log_psi ]', I_aug);
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    log_H_i = log_H[ii];
+    logit_p_i = logit_p[ii];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    log_p = log1m_exp(log_1mp);
+    lp_a0[i] += log_eta[ii] + log_1mp;
+    for (b in 1:Jm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega = log_H_i[b, a]' + log_1mp[:, bp1];
+        log1m_chi[b] = log_sum_exp(Omega - log_1mp[:, bp1] + log_p[:, bp1]);
+        for (j in bp1:Jm1) {
+          int jp1 = j + 1;
+          Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+          log1m_chi[j] = log_sum_exp(Omega - log_1mp[:, jp1] 
+                                     + log_p[:, jp1]);
+        }
+        lp_a0[i, a, b] += log1m_exp(log_sum_exp(log1m_chi[b:]));
+      }
+    }
+    for (b in 1:J) {
+      lp_b0[b, i] = log_sum_exp(lp_a0[i, :, b]);
+    }
+    log_lik0[2, i] += log_sum_exp(lp_b0[:, i]);
+  }
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+/** 
+ * As js_ms_rd() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_ms_rd2(data array[,,] int y, data array[,] int f_l, data array[] int K, 
+            array[,] matrix log_H, array[,] matrix logit_p, vector log_beta, 
+            array[] matrix log_eta, real psi) {
+  int I = size(y), Ip1 = I + 1, J = size(y[1]), Jm1 = J - 1, K_max = max(K), 
+      S = rows(log_H[1, 1]);
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[S, S] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  matrix[S, J] log_1mp, log_p, log_eta_i;
+  vector[Jm1] log1m_chi;
+  vector[S] Omega;
+  array[J, K_max] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    log_p = log1m_exp(log_1mp);
+    log_eta_i = log_eta[i];
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1;
+    y_i[f:l] = y[i, f:l];
+    int y_j = max(y_i[f]);
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      if (bp1 == f) {
+        lp_a[i, :, b] = log_eta_i[:, b] + log_1mp[:, b];
+        lp_b[b, i] = log_beta[b] + log_sum_exp(lp_a[i, :, b] 
+                     + log_H_i[b, :, y_j]);
+      } else {
+        for (s in 1:S) {
+          Omega = log_beta[b] + log_eta_i[s, b] + log_1mp[s, b]
+                  + log_H_i[b, s]' + log_1mp[:, bp1];
+          for (j in bp1 + 1:fm1) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, s, b] = log_sum_exp(Omega + log_H_i[fm1, :, y_j]);
+        }
+        lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+      }
+    }
+    lp_b[f, i] = log_beta[f] + log_eta_i[y_j, f];
+    log_lik[i] += log_sum_exp(lp_b[:f, i]) + log_1mp[y_j, f];
+    for (k in 1:K[f]) {
+      if (y_i[f, k]) {
+        log_lik[i] += logit_p_i[f, y_j, k];
+      }
+    }
+    if (f < l) {
+      Omega = rep_vector(negative_infinity(), S);
+      Omega[y_j] = 0;
+      for (j in f + 1:l) {
+        int jm1 = j - 1, y_jm1 = y_j;
+        y_j = max(y_i[j]);
+        if (y_j) {
+          real lp_j = y_jm1 ?
+                      Omega[y_jm1] + log_H_i[jm1, y_jm1, y_j]
+                      : log_sum_exp(Omega + log_H_i[jm1, :, y_j]);
+          Omega = rep_vector(negative_infinity(), S);
+          Omega[y_j] = lp_j + log_1mp[y_j, j];
+          for (k in 1:K[j]) {
+            if (y_i[j, k]) {
+              Omega[y_j] += logit_p_i[j, y_j, k];
+            }
+          }
+        } else {
+          Omega = y_jm1 ?
+                  Omega[y_jm1] + log_H_i[jm1, y_jm1]'
+                  : log_prod_exp(log_H_i[jm1]', Omega);
+          Omega += log_1mp[:, j];
+        }
+      }
+      log_lik[i] += Omega[y_j];
+    }
+    if (l < J) {
+      int lp1 = l + 1;
+      Omega = log_H_i[l, y_j]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega - log_1mp[:, lp1] + log_p[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega - log_1mp[:, jp1] + log_p[:, jp1]);
+      }
+      log_lik[i] += log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  log_H_i = log_H[Ip1];
+  logit_p_i = logit_p[Ip1];
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+    }
+  }
+  log_p = log1m_exp(log_1mp);
+  matrix[S, Jm1] log_chi;
+  for (l in 1:Jm1) {
+    int lp1 = l + 1;
+    for (s in 1:S) {
+      Omega = log_H_i[l, s]' + log_1mp[:, lp1];
+      log1m_chi[l] = log_sum_exp(Omega - log_1mp[:, lp1] + log_p[:, lp1]);
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, jp1];
+        log1m_chi[j] = log_sum_exp(Omega - log_1mp[:, jp1] + log_p[:, jp1]);
+      }
+      log_chi[s, l] = log1m_exp(log_sum_exp(log1m_chi[l:]));
+    }
+  }
+  matrix[S, J] lp_a0 = log_eta[Ip1] + log_1mp;
+  vector[J] lp_b0 = log_beta;
+  for (j in 1:Jm1) {
+    lp_b0[j] += log_sum_exp(lp_a0[:, j] + log_chi[:, j]);
+  }
+  lp_b0[J] += log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+/** 
+ * Multievent Jolly-Seber individual log likelihoods and marginal log 
+ * likelihoods of entry occasions and entry states for observed individuals, and 
+ * log likelihoods associated with unseen augmented individual(s). Function is 
+ * overloaded (first is much faster without individual effects):
+ *  1. log_H and logit_p per survey with one augmented log likelihood 
+ *     computation
+ *  2. log_H and logit_p per individual and survey with log likelihood 
+ *     computations for each augmented individual
+ * 
+ * @param y         Detection history [I, J]
+ * @param f_l       First and last survey detected [I, 2]
+ * @param log_H     Log transition matrices [(I, )J - 1, S + 1, S + 1]
+ * @param logit_p   Detection logits [(I + I_aug, )S, J]
+ * @param log_E     Log event matrix [(I + I_aug, )J, S, S]
+ * @param log_beta  Log entry probabilities [J]
+ * @param log_eta   Log entry state probabilities [(I + I_aug, )S, J]
+ * @param psi       Inclusion probability
+ *
+ * @return log_lik   Individual log likelihoods of observed [I]
+ * @return log_lik0  Inclusion state log likelihoods of augmented [2(, I_aug)]
+ * @return lp_b      Marginal entry log likelihoods of observed [J, I]
+ * @return lp_b0     Marginal entry log likelihoods of augmented [J(, I_aug)]
+ * @return lp_a      Marginal entry state log likelihoods of observed [I, S, J]
+ * @return lp_a0     Marginal entry state log likelihoods of augmented [(I_aug, ), S, J]
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_me(data array[,] int y, data array[,] int f_l, array[] matrix log_H,
+        matrix logit_p, array[] matrix log_E, vector log_beta, matrix log_eta, 
+        real psi) {
+  int I = size(y), J = size(y[1]), Jm1 = J - 1, Sp1 = rows(log_H[1]), 
+      S = Sp1 - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  matrix[Sp1, J] log_1mp = append_row(log1m_inv_logit(logit_p),
+                                      zeros_row_vector(J));
+  matrix[S, J] log_eta_1mp = log_eta + log_1mp[:S],
+               theta;
+  array[Jm1, S] matrix[S, J] beta_not_p;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      beta_not_p[b, a, :, bp1] = log_beta[b] + log_eta_1mp[a, b] 
+                                 + log_H[b, a, :S]';
+      for (j in bp1:Jm1) {
+        beta_not_p[b, a, :, j + 1] = 
+          log_prod_exp(log_H[j, :S, :S]', 
+                       beta_not_p[b, a, :, j] + log_1mp[:S, j]);
+      }
+    }
+  }
+  vector[Sp1] Omega;
+  array[J] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lp1 = l + 1;
+    y_i[f:l] = y[i, f:l];
+    theta = log_1mp[:S];
+    for (j in f:l) {
+      if (y_i[j]) {
+        theta[:, j] += logit_p[:, j] + log_E[j, :, y_i[j]];
+      }
+    }
+    for (b in 1:fm1) {
+      for (a in 1:S) {
+        Omega[:S] = beta_not_p[b, a, :, f] + theta[:, f];
+        for (j in fp1:l) {
+          Omega[:S] = log_prod_exp(log_H[j - 1, :S, :S]', Omega[:S]) 
+                      + theta[:, j];
+        }
+        if (l == J) {
+          lp_a[i, a, b] = log_sum_exp(Omega[:S]);
+        } else {
+          Omega[Sp1] = negative_infinity();
+          for (j in lp1:J ) {
+            Omega = log_prod_exp(log_H[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, a, b] = log_sum_exp(Omega);
+        }
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    if (f == J) {
+      lp_a[i, :, f] = log_beta[f] + log_eta[:, f] + theta[:, f];
+    } else {
+      for (a in 1:S) {
+        if (is_inf(theta[a, f])) {
+          lp_a[i, a, f] = negative_infinity();
+        } else {
+          Omega[:S] = rep_vector(negative_infinity(), S);
+          Omega[a] = log_beta[f] + log_eta[a, f] + theta[a, f];
+          for (j in fp1:l) {
+            Omega[:S] = log_prod_exp(log_H[j - 1, :S, :S]', Omega[:S])
+                        + theta[:, j];
+          }
+          if (l == J) {
+            lp_a[i, a, f] = log_sum_exp(Omega[:S]);
+          } else {
+            Omega[Sp1] = negative_infinity();
+            for (j in lp1:J ) {
+              Omega = log_prod_exp(log_H[j - 1]', Omega) + log_1mp[:, j];
+            }
+            lp_a[i, a, f] = log_sum_exp(Omega);
+          }
+        }
+      }
+    }
+    lp_b[f, i] = log_sum_exp(lp_a[i, :, f]);
+    log_lik[i] += log_sum_exp(lp_b[:f, i]);
+  }
+  matrix[S, J] lp_a0;
+  vector[J] lp_b0;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega = log_beta[b] + log_eta_1mp[a, b] + log_H[b, a]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        Omega = log_prod_exp(log_H[j]', Omega) + log_1mp[:, j + 1];
+      }
+      lp_a0[a, b] = log_sum_exp(Omega);
+    }
+    lp_b0[b] = log_sum_exp(lp_a0[:, b]);
+  }
+  lp_a0[:, J] = log_beta[J] + log_eta_1mp[:, J];
+  lp_b0[J] = log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+tuple(vector, matrix, matrix, matrix, array[] matrix, array[] matrix)
+  js_me(data array[,] int y, data array[,] int f_l, array[,] matrix log_H,
+        array[] matrix logit_p, array[,] matrix log_E, vector log_beta, 
+        array[] matrix log_eta, real psi) {
+  int I = size(y), I_all = size(log_H), I_aug = I_all - I, J = size(y[1]), 
+      Jm1 = J - 1, Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  matrix[S, J] logit_p_i, log_eta_i, log_eta_1mp, theta;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  array[J] matrix[S, S] log_E_i;
+  vector[Sp1] Omega;
+  array[J] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lp1 = l + 1;
+    y_i[f:l] = y[i, f:l];
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    log_1mp[:S] = log1m_inv_logit(logit_p_i);
+    log_E_i[f:l] = log_E[i, f:l];
+    log_eta_i = log_eta[i];
+    log_eta_1mp[:, :f] = log_eta_i[:, :f] + log_1mp[:S, :f];
+    theta = log_1mp[:S];
+    for (j in f:l) {
+      if (y_i[j]) {
+        theta[:, j] += logit_p_i[:, j] + log_E_i[j, :, y_i[j]];
+      }
+    }
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega[:S] = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a, :S]';
+        for (j in bp1:fm1) {
+          Omega[:S] = log_prod_exp(log_H_i[j, :S, :S]', 
+                                   Omega[:S] + log_1mp[:S, j]);
+        }
+        Omega[:S] += theta[:, f];
+        for (j in fp1:l) {
+          Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                      + theta[:, j];
+        }
+        if (l == J) {
+          lp_a[i, a, b] = log_sum_exp(Omega[:S]);
+        } else {
+          Omega[Sp1] = negative_infinity();
+          for (j in lp1:J) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, a, b] = log_sum_exp(Omega);
+        }
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    if (f == J) {
+      lp_a[i, :, f] = log_beta[f] + log_eta_i[:, f] + theta[:, f];
+    } else {
+      for (a in 1:S) {
+        if (is_inf(theta[a, f])) {
+          lp_a[i, a, f] = negative_infinity();
+        } else {
+          Omega[:S] = rep_vector(negative_infinity(), S);
+          Omega[a] = log_beta[f] + log_eta_i[a, f] + theta[a, f];
+          for (j in fp1:l) {
+            Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                        + theta[:, j];
+          }
+          if (l == J) {
+            lp_a[i, a, f] = log_sum_exp(Omega[:S]);
+          } else {
+            Omega[Sp1] = negative_infinity();
+            for (j in lp1:J ) {
+              Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+            }
+            lp_a[i, a, f] = log_sum_exp(Omega);
+          }
+        }
+      }
+    }
+    lp_b[f, i] = log_sum_exp(lp_a[i, :, f]);
+    log_lik[i] += log_sum_exp(lp_b[:f, i]);
+  }
+  array[I_aug] matrix[S, J] lp_a0;
+  matrix[J, I_aug] lp_b0;
+  matrix[2, I_aug] log_lik0 = rep_matrix([ log_1mpsi, log_psi ]', I_aug);
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    log_H_i = log_H[ii];
+    log_1mp[:S] = log1m_inv_logit(logit_p[ii]);
+    log_eta_1mp = log_eta[ii] + log_1mp[:S];
+    for (b in 1:Jm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a]' 
+                + log_1mp[:, bp1];
+        for (j in bp1:Jm1) {
+          Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, j + 1];
+        }
+        lp_a0[i, a, b] = log_sum_exp(Omega);
+      }
+      lp_b0[b, i] = log_sum_exp(lp_a0[i, :, b]);
+    }
+    lp_a0[i, :, J] = log_beta[J] + log_eta_1mp[:, J];
+    lp_b0[J, i] = log_sum_exp(lp_a0[i, :, J]);
+    log_lik0[2, i] += log_sum_exp(lp_b0[:, i]);
+  }
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+/** 
+ * As js_me() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_me2(data array[,] int y, data array[,] int f_l, array[,] matrix log_H, 
+         array[] matrix logit_p, array[,] matrix log_E, vector log_beta,
+         array[] matrix log_eta, real psi) {
+  int I = size(y), Ip1 = I + 1, J = size(y[1]), Jm1 = J - 1, 
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  matrix[S, J] logit_p_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  array[J] matrix[S, S] log_E_i;
+  matrix[S, J] log_eta_i, log_eta_1mp, theta;
+  vector[Sp1] Omega;
+  array[J] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lp1 = l + 1;
+    y_i[f:l] = y[i, f:l];
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    log_1mp[:S] = log1m_inv_logit(logit_p_i);
+    log_E_i[f:l] = log_E[i, f:l];
+    log_eta_i = log_eta[i];
+    log_eta_1mp[:, :f] = log_eta_i[:, :f] + log_1mp[:S, :f];
+    theta = log_1mp[:S];
+    for (j in f:l) {
+      int y_j = y_i[j];
+      if (y_j) {
+        theta[:, j] += logit_p_i[:, j] + log_E_i[j, :, y_j];
+      }
+    }
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega[:S] = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a, :S]';
+        for (j in bp1:fm1) {
+          Omega[:S] = log_prod_exp(log_H_i[j, :S, :S]', 
+                                   Omega[:S] + log_1mp[:S, j]);
+        }
+        Omega[:S] += theta[:, f];
+        for (j in fp1:l) {
+          Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                      + theta[:, j];
+        }
+        if (l == J) {
+          lp_a[i, a, b] = log_sum_exp(Omega[:S]);
+        } else {
+          Omega[Sp1] = negative_infinity();
+          for (j in lp1:J) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, a, b] = log_sum_exp(Omega);
+        }
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    if (f == J) {
+      lp_a[i, :, f] = log_beta[f] + log_eta_i[:, f] + theta[:, f];
+    } else {
+      for (a in 1:S) {
+        if (is_inf(theta[a, f])) {
+          lp_a[i, a, f] = negative_infinity();
+        } else {
+          Omega[:S] = rep_vector(negative_infinity(), S);
+          Omega[a] = log_beta[f] + log_eta_i[a, f] + theta[a, f];
+          for (j in fp1:l) {
+            Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                        + theta[:, j];
+          }
+          if (l == J) {
+            lp_a[i, a, f] = log_sum_exp(Omega[:S]);
+          } else {
+            Omega[Sp1] = negative_infinity();
+            for (j in lp1:J ) {
+              Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+            }
+            lp_a[i, a, f] = log_sum_exp(Omega);
+          }
+        }
+      }
+    }
+    lp_b[f, i] = log_sum_exp(lp_a[i, :, f]);
+    log_lik[i] += log_sum_exp(lp_b[:f, i]);
+  }
+  log_H_i = log_H[Ip1];
+  log_1mp[:S] = log1m_inv_logit(logit_p[Ip1]);
+  log_eta_1mp = log_eta[Ip1] + log_1mp[:S];
+  matrix[S, J] lp_a0;
+  vector[J] lp_b0;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a]' 
+              + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, j + 1];
+      }
+      lp_a0[a, b] = log_sum_exp(Omega);
+    }
+    lp_b0[b] = log_sum_exp(lp_a0[:, b]);
+  }
+  lp_a0[:, J] = log_beta[J] + log_eta_1mp[:, J];
+  lp_b0[J] = log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+/** 
+ * Robust design multievent Jolly-Seber individual log likelihoods and marginal 
+ * log likelihoods of entry occasions and entry states for observed individuals, 
+ * and log likelihoods associated with unseen augmented individual(s). Function 
+ * is overloaded (first is much faster without individual effects):
+ *  1. log_H and logit_p per survey/secondary with one augmented log likelihood 
+ *     computation
+ *  2. log_H and logit_p per individual and survey/secondary with log likelihood 
+ *     computations for each augmented individual
+ * 
+ * @param y         Detection history [I, J, K_max]
+ * @param f_l       First and last survey detected [I, 2]
+ * @param K         Number of secondaries [J]
+ * @param log_H     Log transition matrices [(I + I_aug, )J - 1, S + 1, S + 1]
+ * @param logit_p   Detection logits [(I + I_aug, )J, S, K_max]
+ * @param log_E     Log event matrix [(I + I_aug, )J, K_max, S, S]
+ * @param log_beta  Log entry probabilities [J]
+ * @param log_eta   Log entry state probabilities [(I + I_aug, )S, J]
+ * @param psi       Inclusion probability
+ *
+ * @return log_lik   Individual log likelihoods of observed [I]
+ * @return log_lik0  Inclusion state log likelihoods of augmented [2(, I_aug)]
+ * @return lp_b      Marginal entry log likelihoods of observed [J, I]
+ * @return lp_b0     Marginal entry log likelihoods of augmented [J(, I_aug)]
+ * @return lp_a      Marginal entry state log likelihoods of observed [I, S, J]
+ * @return lp_a0     Marginal entry state log likelihoods of augmented [(I_aug, ), S, J]
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_me_rd(data array[,,] int y, data array[,] int f_l, data array[] int K,
+           array[] matrix log_H, array[] matrix logit_p, array[,] matrix log_E, 
+           vector log_beta, matrix log_eta, real psi) {
+  int I = size(y), J = size(y[1]), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1]), S = Sp1 - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p[j, s, :K_j]));
+    }
+  }
+  matrix[S, J] log_eta_1mp = log_eta + log_1mp[:S], theta;
+  array[Jm1, S] matrix[S, J] beta_not_p;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      beta_not_p[b, a, :, bp1] = log_beta[b] + log_eta_1mp[a, b] 
+                                 + log_H[b, a, :S]';
+      for (j in bp1:Jm1) {
+        beta_not_p[b, a, :, j + 1] = 
+          log_prod_exp(log_H[j, :S, :S]', 
+                       beta_not_p[b, a, :, j] + log_1mp[:S, j]);
+      }
+    }
+  }
+  vector[Sp1] Omega;
+  array[J, K_max] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lp1 = l + 1;
+    y_i[f:l] = y[i, f:l];
+    theta = log_1mp[:S];
+    for (j in f:l) {
+      for (k in 1:K[j]) {
+        int y_k = y_i[j, k];
+        if (y_k) {
+          theta[:, j] += logit_p[j, :, k] + log_E[j, k, :, y_k];
+        }
+      }
+    }
+    for (b in 1:fm1) {
+      for (a in 1:S) {
+        Omega[:S] = beta_not_p[b, a, :, f] + theta[:, f];
+        for (j in fp1:l) {
+          int y_j = max(y_i[j]);
+          Omega[:S] = log_prod_exp(log_H[j - 1, :S, :S]', Omega[:S])
+                      + theta[:, j];
+        }
+        if (l == J) {
+          lp_a[i, a, b] = log_sum_exp(Omega[:S]);
+        } else {
+          Omega[Sp1] = negative_infinity();
+          for (j in lp1:J ) {
+            Omega = log_prod_exp(log_H[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, a, b] = log_sum_exp(Omega);
+        }
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    if (f == J) {
+      lp_a[i, :, f] = log_beta[f] + log_eta[:, f] + theta[:, f];
+    } else {
+      for (a in 1:S) {
+        if (is_inf(theta[a, f])) {
+          lp_a[i, a, f] = negative_infinity();
+        } else {
+          Omega[:S] = rep_vector(negative_infinity(), S);
+          Omega[a] = log_beta[f] + log_eta[a, f] + theta[a, f];
+          for (j in fp1:l) {
+            Omega[:S] = log_prod_exp(log_H[j - 1, :S, :S]', Omega[:S])
+                        + theta[:, j];
+          }
+          if (l == J) {
+            lp_a[i, a, f] = log_sum_exp(Omega[:S]);
+          } else {
+            Omega[Sp1] = negative_infinity();
+            for (j in lp1:J ) {
+              Omega = log_prod_exp(log_H[j - 1]', Omega) + log_1mp[:, j];
+            }
+            lp_a[i, a, f] = log_sum_exp(Omega);
+          }
+        }
+      }
+    }
+    lp_b[f, i] = log_sum_exp(lp_a[i, :, f]);
+    log_lik[i] += log_sum_exp(lp_b[:f, i]);
+  }
+  matrix[S, J] lp_a0;
+  vector[J] lp_b0;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega = log_beta[b] + log_eta_1mp[a, b] + log_H[b, a]' 
+              + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        Omega = log_prod_exp(log_H[j]', Omega) + log_1mp[:, j + 1];
+      }
+      lp_a0[a, b] = log_sum_exp(Omega);
+    }
+    lp_b0[b] = log_sum_exp(lp_a0[:, b]);
+  }
+  lp_a0[:, J] = log_beta[J] + log_eta_1mp[:, J];
+  lp_b0[J] = log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+tuple(vector, matrix, matrix, matrix, array[] matrix, array[] matrix)
+  js_me_rd(data array[,,] int y, data array[,] int f_l, data array[] int K,
+           array[,] matrix log_H, array[,] matrix logit_p,
+           array[,,] matrix log_E, vector log_beta, array[] matrix log_eta,
+           real psi) {
+  int I = size(y), I_all = size(log_H), I_aug = I_all - I, J = size(y[1]), 
+      Jm1 = J - 1, K_max = max(K), Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  array[J, K_max] matrix[S, S] log_E_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  matrix[S, J] log_eta_i, log_eta_1mp, theta;
+  vector[Sp1] Omega;
+  array[J, K_max] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lp1 = l + 1;
+    y_i[f:l] = y[i, f:l];
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    log_E_i[f:l] = log_E[i, f:l];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    log_eta_i = log_eta[i];
+    log_eta_1mp[:, :f] = log_eta_i[:, :f] + log_1mp[:S, :f];
+    theta = log_1mp[:S];
+    for (j in f:l) {
+      for (k in 1:K[j]) {
+        int y_k = y_i[j, k];
+        if (y_k) {
+          theta[:, j] += logit_p_i[j, :, k] + log_E_i[j, k, :, y_k];
+        }
+      }
+    }
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega[:S] = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a, :S]';
+        for (j in bp1:fm1) {
+          Omega[:S] = log_prod_exp(log_H_i[j, :S, :S]', 
+                                   Omega[:S] + log_1mp[:S, j]);
+        }
+        Omega[:S] += theta[:, f];
+        for (j in fp1:l) {
+          Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                      + theta[:, j];
+        }
+        if (l == J) {
+          lp_a[i, a, b] = log_sum_exp(Omega[:S]);
+        } else {
+          Omega[Sp1] = negative_infinity();
+          for (j in lp1:J) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, a, b] = log_sum_exp(Omega);
+        }
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    if (f == J) {
+      lp_a[i, :, f] = log_beta[f] + log_eta_i[:, f] + theta[:, f];
+    } else {
+      for (a in 1:S) {
+        if (is_inf(theta[a, f])) {
+          lp_a[i, a, f] = negative_infinity();
+        } else {
+          Omega[:S] = rep_vector(negative_infinity(), S);
+          Omega[a] = log_beta[f] + log_eta_i[a, f] + theta[a, f];
+          for (j in fp1:l) {
+            Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                        + theta[:, j];
+          }
+          if (l == J) {
+            lp_a[i, a, f] = log_sum_exp(Omega[:S]);
+          } else {
+            Omega[Sp1] = negative_infinity();
+            for (j in lp1:J ) {
+              Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+            }
+            lp_a[i, a, f] = log_sum_exp(Omega);
+          }
+        }
+      }
+    }
+    lp_b[f, i] = log_sum_exp(lp_a[i, :, f]);
+    log_lik[i] += log_sum_exp(lp_b[:f, i]);
+  }
+  array[I_aug] matrix[S, J] lp_a0;
+  matrix[J, I_aug] lp_b0;
+  matrix[2, I_aug] log_lik0 = rep_matrix([ log_1mpsi, log_psi ]', I_aug);
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    log_H_i = log_H[ii];
+    logit_p_i = logit_p[ii];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    log_eta_1mp = log_eta[ii] + log_1mp[:S];
+    for (b in 1:Jm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a]' 
+                + log_1mp[:, bp1];
+        for (j in bp1:Jm1) {
+          Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, j + 1];
+        }
+        lp_a0[i, a, b] = log_sum_exp(Omega);
+      }
+      lp_b0[b, i] = log_sum_exp(lp_a0[i, :, b]);
+    }
+    lp_a0[i, :, J] = log_beta[J] + log_eta_1mp[:, J];
+    lp_b0[J, i] = log_sum_exp(lp_a0[i, :, J]);
+    log_lik0[2, i] += log_sum_exp(lp_b0[:, i]);
+  }
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}
+
+/** 
+ * As js_me_rd() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(vector, vector, matrix, vector, array[] matrix, matrix)
+  js_me_rd2(data array[,,] int y, data array[,] int f_l, data array[] int K,
+            array[,] matrix log_H, array[,] matrix logit_p,
+            array[,,] matrix log_E, vector log_beta, array[] matrix log_eta, 
+            real psi) {
+  int I = size(y), Ip1 = I + 1, J = size(y[1]), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  real log_psi = log(psi), log_1mpsi = log1m(psi);
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  array[J, K_max] matrix[S, S] log_E_i;
+  matrix[S, J] log_eta_i, log_eta_1mp, theta;
+  vector[Sp1] Omega;
+  array[J, K_max] int y_i;
+  array[I] matrix[S, J] lp_a;
+  matrix[J, I] lp_b;
+  vector[I] log_lik = rep_vector(log_psi, I);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lp1 = l + 1;
+    y_i[f:l] = y[i, f:l];
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    log_E_i[f:l] = log_E[i, f:l];
+    log_eta_i = log_eta[i];
+    log_eta_1mp[:, :f] = log_eta_i[:, :f] + log_1mp[:S, :f];
+    theta = log_1mp[:S];
+    for (j in f:l) {
+      for (k in 1:K[j]) {
+        int y_k = y_i[j, k];
+        if (y_k) {
+          theta[:, j] += logit_p_i[j, :, k] + log_E_i[j, k, :, y_k];
+        }
+      }
+    }
+    for (b in 1:fm1) {
+      int bp1 = b + 1;
+      for (a in 1:S) {
+        Omega[:S] = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a, :S]';
+        for (j in bp1:fm1) {
+          Omega[:S] = log_prod_exp(log_H_i[j, :S, :S]', 
+                                   Omega[:S] + log_1mp[:S, j]);
+        }
+        Omega[:S] += theta[:, f];
+        for (j in fp1:l) {
+          Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                      + theta[:, j];
+        }
+        if (l == J) {
+          lp_a[i, a, b] = log_sum_exp(Omega[:S]);
+        } else {
+          Omega[Sp1] = negative_infinity();
+          for (j in lp1:J) {
+            Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+          }
+          lp_a[i, a, b] = log_sum_exp(Omega);
+        }
+      }
+      lp_b[b, i] = log_sum_exp(lp_a[i, :, b]);
+    }
+    if (f == J) {
+      lp_a[i, :, f] = log_beta[f] + log_eta_i[:, f] + theta[:, f];
+    } else {
+      for (a in 1:S) {
+        if (is_inf(theta[a, f])) {
+          lp_a[i, a, f] = negative_infinity();
+        } else {
+          Omega[:S] = rep_vector(negative_infinity(), S);
+          Omega[a] = log_beta[f] + log_eta_i[a, f] + theta[a, f];
+          for (j in fp1:l) {
+            Omega[:S] = log_prod_exp(log_H_i[j - 1, :S, :S]', Omega[:S])
+                        + theta[:, j];
+          }
+          if (l == J) {
+            lp_a[i, a, f] = log_sum_exp(Omega[:S]);
+          } else {
+            Omega[Sp1] = negative_infinity();
+            for (j in lp1:J ) {
+              Omega = log_prod_exp(log_H_i[j - 1]', Omega) + log_1mp[:, j];
+            }
+            lp_a[i, a, f] = log_sum_exp(Omega);
+          }
+        }
+      }
+    }
+    lp_b[f, i] = log_sum_exp(lp_a[i, :, f]);
+    log_lik[i] += log_sum_exp(lp_b[:f, i]);
+  }
+  log_H_i = log_H[Ip1];
+  logit_p_i = logit_p[Ip1];
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+    }
+  }
+  log_eta_1mp = log_eta[Ip1] + log_1mp[:S];
+  matrix[S, J] lp_a0;
+  vector[J] lp_b0;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega = log_beta[b] + log_eta_1mp[a, b] + log_H_i[b, a]' 
+              + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        Omega = log_prod_exp(log_H_i[j]', Omega) + log_1mp[:, j + 1];
+      }
+      lp_a0[a, b] = log_sum_exp(Omega);
+    }
+    lp_b0[b] = log_sum_exp(lp_a0[:, b]);
+  }
+  lp_a0[:, J] = log_beta[J] + log_eta_1mp[:, J];
+  lp_b0[J] = log_sum_exp(lp_a0[:, J]);
+  vector[2] log_lik0 = [ log_1mpsi, log_psi + log_sum_exp(lp_b0) ]';
+  return (log_lik, log_lik0, lp_b, lp_b0, lp_a, lp_a0);
+}

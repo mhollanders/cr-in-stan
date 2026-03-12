@@ -1,0 +1,628 @@
+---
+title: Simulation-based calibration of capture-mark-recapture models in Stan
+format: 
+  pdf:
+    toc: true
+    mathspec: true
+execute:
+  warning: false
+  message: false
+  fig-asp: 1.2
+bibliography: '`r here::here("manuscript/cr-in-stan.bib")`'
+csl: '`r here::here("manuscript/methods-in-ecology-and-evolution.csl")`'
+no-cite: |
+  @wickham2019
+abstract: |
+  This document contains the results of simulation-based calibration (SBC) for each model described in the manuscript. Calibration is assessed through ECDF plots and parameter estimates are visually inspected alongside their true values. The simulation script is printed at the end of this document.
+editor_options: 
+  chunk_output_type: console
+---
+
+\newpage
+
+# Introduction
+
+Simulation-based calibration (SBC) was used to assess whether Stan programs correctly encoded the data-generating processes (DGPs). Briefly, SBC works by simulating prior predictive datasets, sampling from the joint posterior distribution, and then assessing the ranks of the simulated values within the posterior draws of model parameters [@modrak2023]. If the model reflects the DGP, then the ranks are uniformly distributed which is assessed using the `SBC::plot_ecdf_diff()` function, where the black squiggly lines should fall within the blue ellipses. Parameter estimates were also plotted alongside their input to visually assess parameter recovery. Models were fit with CmdStanR 0.9 [@gabry2025] using CmdStan 2.38 with 500 simulated datasets per model. In Jolly-Seber models, the forward-backward sampling algorithm was used to recover latent discrete parameters [@zucchini2017], which are used to produce population size and number of entries and exits per survey/primary, as well as the super-population. 
+
+Stan programs accommodate two model versions utilising different likelihood functions: 
+
+  1. Functions accommodating survey-varying parameters which share likelihood terms between individuals, with only one likelihood computation for augmented individuals in Jolly-Seber models. These are the default models in this document but can be changed by setting `ind = FALSE` in the data provided to Stan or via the [simulation script](#sec-dgp).
+  2. Functions accommodating individual-by-survey varying parameters, where most likelihood terms must be computed for each individual separately, including for all augmented individuals in Jolly-Seber models. These models are fit by setting `ind = TRUE` and `collapse = FALSE`. Note that because no individual-level predictors are observed for augmented individuals, these parameters must be imputed; the same would be true for individual-by-survey varying predictors for all surveys where individuals were not detected.
+  
+Additionally, for Jolly-Seber models, there is an additional "collapsed" version of (2) with only one likelihood computation for augmented individuals like in version (1). This version permits individual parameters for the observed sample of individuals, while computational burden of the augmented computations is reduced. These models can be fit by setting `ind = TRUE` and `collapse = TRUE`, and use the `js*2()` and `js*2_rng()` function signatures. For Cormack-Jolly-Seber models, the `grainsize` argument can be set to enable within-chain parallelisation.
+  
+Parameters were simulated as follows:
+
+  - Mortality hazard rates ($h$) as constant and state-specific in multistate/multievent;
+  - Detection probabilities ($p$) varying by survey/primary (not secondary in robust design) and state-specific in multistate/multievent;
+  - Transition rates ($q$) as constant and unique for each transition;
+  - Event matrices ($\boldsymbol{E}$) as lower bidiagional stochastic (rows sum to 1);
+  - Initial state probabilities ($\eta$) as constant (simplex);
+  - Entry probabilities ($\boldsymbol{\beta}$) as varying by survey/primary, with survey intervals as offsets, as logistic-normal (but can be fit by setting `dirichlet = TRUE`).
+
+```{r}
+# load packages and functions
+library(SBC)
+library(cmdstanr)
+library(here)
+library(tidyverse)
+source(here("sbc/util.R"))
+source(here("sbc/dgp-cr.R"))
+theme_set(my_theme(base_size = 6))
+
+# set simulation and HMC parameters
+N_super <- 200 ; J <- 6 ; Jm1 <- J - 1 ; K_max <- 3 ; S <- 2 ; n_sims <- 500
+chains <- 8 ; iter_warmup <- 200 ; iter_sampling <- 500 ; max_treedepth <- 10
+options(digits = 3, mc.cores = chains)
+```
+
+\newpage
+
+# Cormack-Jolly-Seber
+
+## Single survey
+
+```{r cjs}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/cjs.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+```{r}
+#| fig-asp: 0.8
+
+plot_sbc(sbc, nrow = 2)
+```
+
+\newpage
+
+## Robust design
+
+```{r cjs-rd}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J, 
+                                   K_max = K_max) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/cjs-rd.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+```{r}
+#| fig-asp: 0.8
+
+plot_sbc(sbc, nrow = 2)
+```
+
+\newpage
+
+# Multistate Cormack-Jolly-Seber
+
+## Single survey
+
+```{r cjs-ms}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J, 
+                                   S = S) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/cjs-ms.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+::: callout-warning
+In single survey multistate/multievent models, transition rates and state-specific detection probabilities are confounded [@hollanders2022]. Notice the difference in parameter estimates with the robust design.
+:::
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c("h[", 1:S, "]"), str_c("q[", 1:(S * (S - 1)), "]")))
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c("p[", rep(1:S, each = Jm1), ",", rep(1:Jm1, S), "]"), 
+         ncol = Jm1)
+```
+
+\newpage
+
+## Robust design
+
+```{r cjs-ms-rd}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J, 
+                                   K_max = K_max, S = S) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/cjs-ms-rd.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c("h[", 1:S, "]"), str_c("q[", 1:(S * (S - 1)), "]")))
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c("p[", rep(1:S, each = J), ",", rep(1:J, S), "]"), ncol = J)
+```
+
+\newpage
+
+# Multievent Cormack-Jolly-Seber
+
+Lower bidiagonal stochastic matrices were specified for the event matrix $\boldsymbol{E}$, with state-specific assignment probabilities $\boldsymbol{\delta} = \left( \delta_1, \dots, \delta_{S-1} \right)$ corresponding to assigning to states $s \forall \{2, \dots, S\}$, with state $s-1$ having state misclassification probability $1 - \delta_s$.
+
+## Single survey
+
+```{r cjs-me}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J,
+                                   S = S, ME = T) |>
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/cjs-me.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c(rep(c("h", "eta"), each = S), "[", rep(1:S, 2), "]"),
+                str_c("q[", 1:(S * (S - 1)), "]"),
+                str_c("delta[", 1:(S - 1), "]")), nrow = 2)
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c("p[", rep(1:S, each = Jm1), ",", rep(1:Jm1, S), "]"),
+         ncol = Jm1)
+```
+
+\newpage
+
+## Robust design
+
+```{r cjs-me-rd}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J, 
+                                   K_max = K_max, S = S, ME = T) |>
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/cjs-me-rd.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c(rep(c("h", "eta"), each = S), "[", rep(1:S, 2), "]"),
+                str_c("q[", 1:(S * (S - 1)), "]"),
+                str_c("delta[", 1:(S - 1), "]")))
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c("p[", rep(1:S, each = J), ",", rep(1:J, S), "]"), ncol = J)
+```
+
+\newpage
+
+# Jolly-Seber
+
+## Single survey
+
+```{r js}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J, 
+                                   JS = T) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/js.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+::: callout-warning
+In single survey Jolly-Seber models with time-varying entry and detection probabilities, the first entry and detection probabilities are confounded [@schwarz2008]. Notice the difference in parameter estimates with the robust design.
+:::
+
+\newpage
+
+```{r}
+#| fig-asp: 0.7
+
+plot_sbc(sbc, c("h", "mu", "gamma", "N_super"))
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c(rep(c("log_beta", "p"), each = J), "[", rep(1:J, 2), "]"),
+         ncol = J)
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c(rep(c("N", "B", "D"), each = J), "[", rep(1:J, 3), "]"),
+         ncol = J)
+```
+
+\newpage
+
+## Robust design
+
+```{r js-rd}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J,
+                                   K_max = K_max, JS = T) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/js-rd.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+```{r}
+#| fig-asp: 0.8
+
+plot_sbc(sbc, c("h", "mu", "gamma", "N_super"))
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c(rep(c("log_beta", "p"), each = J), "[", rep(1:J, 2), "]"),
+         ncol = J)
+```
+
+\newpage
+
+```{r}
+plot_sbc(sbc, str_c(rep(c("N", "B", "D"), each = J), "[", rep(1:J, 3), "]"),
+         ncol = J)
+```
+
+\newpage
+
+# Multistate Jolly-Seber
+
+## Single survey
+
+```{r js-ms}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J,
+                                   S = 3, JS = T) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/js-ms.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c(rep(c("h", "eta"), each = S), "[", rep(1:S, 2), "]"),
+                str_c("q[", 1:(S * (S - 1)), "]"),
+                str_c("log_beta[", 1:J, "]"), "mu", "gamma", "N_super"), 
+         nrow = 3)
+```
+
+\newpage
+
+```{r}
+params <- map(c("p", "N", "B", "D"), 
+              ~str_c(., "[", rep(1:S, each = J), ",", rep(1:J, S), "]"))
+plot_sbc(sbc, params[[1]], nrow = 2)
+```
+
+\newpage
+
+```{r}
+plot_ecdf_diff(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J) +
+  theme(legend.position = "none")
+```
+
+\newpage
+
+```{r}
+plot_sim_estimated(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J, scales = "free")
+```
+
+\newpage
+
+## Robust design
+
+```{r js-ms-rd}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J,
+                                   K_max = K_max, S = S, JS = T) |> 
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/js-ms-rd.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c(rep(c("h", "eta"), each = S), "[", rep(1:S, 2), "]"),
+                str_c("q[", 1:(S * (S - 1)), "]"),
+                str_c("log_beta[", 1:J, "]"), "mu", "gamma", "N_super"), 
+         nrow = 3)
+```
+
+\newpage
+
+```{r}
+params <- map(c("p", "N", "B", "D"), 
+              ~str_c(., "[", rep(1:S, each = J), ",", rep(1:J, S), "]"))
+plot_sbc(sbc, params[[1]], nrow = 2)
+```
+
+\newpage
+
+```{r}
+plot_ecdf_diff(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J) +
+  theme(legend.position = "none")
+```
+
+\newpage
+
+```{r}
+plot_sim_estimated(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J, scales = "free")
+```
+
+\newpage
+
+# Multievent Jolly-Seber
+
+## Single survey
+
+```{r js-me}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J,
+                                   S = S, ME = T, JS = T) |>
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/js-me.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c(rep(c("h", "eta"), each = S), "[", rep(1:S, 2), "]"),
+                str_c("q[", 1:(S * (S - 1)), "]"),
+                str_c("log_beta[", 1:J, "]"), str_c("delta[", 1:(S - 1), "]"), 
+                "mu", "gamma", "N_super"), nrow = 3)
+```
+
+\newpage
+
+```{r}
+params <- map(c("p", "N", "B", "D"), 
+              ~str_c(., "[", rep(1:S, each = J), ",", rep(1:J, S), "]"))
+plot_sbc(sbc, params[[1]], nrow = 2)
+```
+
+\newpage
+
+```{r}
+plot_ecdf_diff(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J) +
+  theme(legend.position = "none")
+```
+
+\newpage
+
+```{r}
+plot_sim_estimated(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J, scales = "free")
+```
+
+\newpage
+
+## Robust design
+
+```{r js-me-rd}
+datasets <- SBC_generator_function(simulate_cmr, N_super = N_super, J = J, 
+                                   K_max = K_max, S = S, ME = T, JS = T) |>
+  generate_datasets(n_sims)
+backend <- SBC_backend_cmdstan_sample(cmdstan_model(here("stan/js-me-rd.stan")),
+                                      init = 0.1, chains = chains,
+                                      iter_warmup = iter_warmup,
+                                      iter_sampling = iter_sampling,
+                                      max_treedepth = max_treedepth)
+sbc <- compute_SBC(datasets, backend, cores_per_fit = chains, keep_fits = F)
+```
+
+Mean time for the slowest of `r chains` chains with `r iter_warmup + iter_sampling` iterations: `r mean(sbc$backend_diagnostics$max_chain_time) / 60` minutes.
+
+\newpage
+
+```{r}
+plot_sbc(sbc, c(str_c(rep(c("h", "eta"), each = S), "[", rep(1:S, 2), "]"),
+                str_c("q[", 1:(S * (S - 1)), "]"),
+                str_c("log_beta[", 1:J, "]"), str_c("delta[", 1:(S - 1), "]"), 
+                "mu", "gamma", "N_super"), nrow = 3)
+```
+
+\newpage
+
+```{r}
+params <- map(c("p", "N", "B", "D"), 
+              ~str_c(., "[", rep(1:S, each = J), ",", rep(1:J, S), "]"))
+plot_sbc(sbc, params[[1]], nrow = 2)
+```
+
+\newpage
+
+```{r}
+plot_ecdf_diff(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J) + 
+  theme(legend.position = "none")
+```
+
+\newpage
+
+```{r}
+plot_sim_estimated(sbc, flatten_chr(params[2:4])) +
+  facet_wrap(~ variable, ncol = J, scales = "free")
+```
+
+\newpage
+
+# Simulation script {#sec-dgp}
+
+```{r}
+#| echo: false
+#| results: "asis"
+
+cat("```r\n", 
+    paste(readLines(here("sbc/dgp-cmr.R")), 
+          collapse = "\n"), 
+    "\n```")
+```
+
+\newpage
+
+# Utility functions
+
+```{r}
+# transition rate matrix from vectors of mortality and transition rates
+rate_matrix <- function(h, q) {
+  S <- length(h)
+  Sp1 <- S + 1 ; Sm1 = S - 1
+  Q <- matrix(0, Sp1, Sp1)
+  Q[1:S, Sp1] <- h
+  q_s <- head(q, Sm1)
+  Q[1, 1] <- -(h[1] + sum(q_s))
+  Q[1, 2:S] <- q_s
+  if (S > 2) {
+    idx <- S
+    for (s in 2:Sm1) {
+      q_s <- q[idx:(idx + S - 2)]
+      Q[s, 1:(s - 1)] <- head(q_s, s - 1)
+      Q[s, s] <- -(h[s] + sum(q_s))
+      Q[s, (s + 1):S] <- tail(q_s, S - s)
+      idx <- idx + Sm1
+    }
+  }
+  q_s <- tail(q, Sm1)
+  Q[S, 1:Sm1] <- q_s
+  Q[S, S] <- -(h[S] + sum(q_s))
+  Q
+}
+
+# triangular biadiagonal stochastic matrix
+triangular_bidiagonal_stochastic_matrix <- function(delta) {
+  E <- diag(c(1, delta))
+  for (s in 2:(length(delta) + 1)) {
+    sm1 <- s - 1
+    E[s, sm1:s] <- c(1 - delta[sm1], delta[sm1])
+  }
+  E
+}
+
+# random categorical draws
+rcat <- function(n = 1, prob) {
+  rmultinom(n, size = 1, prob) |>
+    apply(2, \(x) which(x == 1))
+}
+
+# random Dirichlet draws
+rdirch <- function(n = 1, alpha) {
+  D <- length(alpha)
+  out <- matrix(NA, n, D)
+  for (i in 1:n) {
+    u <- rgamma(D, alpha, 1)
+    out[i, ] <- u / sum(u)
+  }
+  if (n == 1) {
+    out[1, ]
+  } else {
+    out
+  }
+}
+
+# plot ECDF-diff and estimates plots together
+if (!require(patchwork)) install.packages("patchwork")
+plot_sbc <- function(sbc, ..., nrow = NULL, ncol = NULL) {
+  patchwork::wrap_plots(
+    plot_ecdf_diff(sbc, ...) +
+      ggplot2::facet_wrap(~ group, 
+                          nrow = nrow, 
+                          ncol = ncol) + 
+      ggplot2::theme(legend.position = "none"), 
+    plot_sim_estimated(sbc, ...) +
+      ggplot2::facet_wrap(~ variable, 
+                          nrow = nrow, 
+                          ncol = ncol, 
+                          scales = "free"),
+    ncol = 1
+  )
+}
+```
+
+\newpage
+
+# References

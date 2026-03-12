@@ -1,0 +1,2445 @@
+/** 
+ * Jolly-Seber population sizes, number of entries and exits, and 
+ * super-population using the forward-backward sampling algorithm. Function is 
+ * overloaded:
+ *  1. log_phi and logit_p per survey
+ *  2. log_phi and logit_p per individual and survey
+ * 
+ * @param lp       Output of js()
+ * @param f_l      First and last survey detected [I, 2]
+ * @param log_phi  Log survival probabilities [(I, )J - 1]
+ * @param logit_p  Detection logits [(I, )J]
+ * @param I_aug    Number of augmented individuals
+ 
+ * @return N        Population sizes [J]
+ * @return B        Number of entries [J]
+ * @return D        Number of exits [J]
+ * @return N_super  Super-population
+ */
+tuple(array[] int, array[] int, array[] int, int) 
+  js_rng(tuple(vector, vector, matrix, vector) lp, data array[,] int f_l, 
+         vector log_phi, vector logit_p, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1;
+  vector[Jm1] log_1mphi = log1m_exp(log_phi);
+  array[Jm1] matrix[2, 2] log_H;
+  for (j in 1:Jm1) {
+    log_H[j] = [[ log_phi[j], log_1mphi[j] ],
+                [ negative_infinity(), 0 ]];
+  }
+  vector[J] log_1mp = log1m_inv_logit(logit_p);
+  array[Jm1] matrix[2, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    Omega[b, :, bp1] = log_H[b, 1]';
+    Omega[b, 1, bp1] += log_1mp[bp1];
+    for (j in bp1:Jm1) {
+      int jp1 = j + 1;
+      Omega[b, :, jp1] = log_prod_exp(log_H[j]', Omega[b, :, j]);
+      Omega[b, 1, jp1] += log_1mp[jp1];
+    }
+  }
+  array[J] int N = zeros_int_array(J), B = zeros_int_array(J), 
+               D = zeros_int_array(J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], last_alive = l;
+    if (last_alive < J) {
+      int z = categorical_logit_rng(Omega[l, :, J]);
+      if (z == 1) {
+        last_alive = J;
+      } else {
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, l + 1, Jm1);
+          for (j in reverse(idx)) {
+            z = categorical_logit_rng(Omega[l, :, j] + log_H[j, :, 2]);
+            if (z == 1) {
+              last_alive = j;
+              break;
+            }
+          }
+        }
+      }
+    }
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]);
+    B[b] += 1;
+    for (j in b:last_alive) {
+      N[j] += 1;
+    }
+    if (last_alive < J) {
+      D[last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b;
+      if (b < J) {
+        int z = categorical_logit_rng(Omega[b, :, J]);
+        if (z == 1) {
+          last_alive = J;
+        } else {
+          if (b < Jm1) {
+            int JJ = Jm1 - b;
+            array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+            for (j in reverse(idx)) {
+              z = categorical_logit_rng(Omega[b, :, j] + log_H[j, :, 2]);
+              if (z == 1) {
+                last_alive = j;
+                break;
+              }
+            }
+          }
+        }
+      }
+      B[b] += 1;
+      for (j in b:last_alive) {
+        N[j] += 1;
+      }
+      if (last_alive < J) {
+        D[last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+tuple(array[] int, array[] int, array[] int, int) 
+  js_rng(tuple(vector, matrix, matrix, matrix) lp, data array[,] int f_l, 
+         matrix log_phi, matrix logit_p, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1;
+  vector[Jm1] log_1mphi;
+  matrix[2, 2] log_H;
+  log_H[2] = [ negative_infinity(), 0 ];
+  vector[J] log_1mp;
+  matrix[2, J] Omega;
+  array[J] int N = zeros_int_array(J), B = zeros_int_array(J), 
+               D = zeros_int_array(J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], last_alive = l;
+    if (l < J) {
+      int lp1 = l + 1;
+      log_1mphi[l:] = log1m_exp(log_phi[l:, i]);
+      log_1mp[lp1:] = log1m_inv_logit(logit_p[lp1:, i]);
+      Omega[:, lp1] = [ log_phi[l, i] + log_1mp[lp1], 
+                        log_1mphi[l] ]';
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        log_H[1] = [ log_phi[j, i], log_1mphi[j] ];
+        Omega[:, jp1] = log_prod_exp(log_H', Omega[:, j]);
+        Omega[1, jp1] += log_1mp[jp1];
+      }
+      int z = categorical_logit_rng(Omega[:, J]);
+      if (z == 1) {
+        last_alive = J;
+      } else {
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            Omega[1, j] += log_1mphi[j];
+            z = categorical_logit_rng(Omega[:, j]);
+            if (z == 1) {
+              last_alive = j;
+              break;
+            }
+          }
+        }
+      }
+    }
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]);
+    B[b] += 1;
+    for (j in b:last_alive) {
+      N[j] += 1;
+    }
+    if (last_alive < J) {
+      D[last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2[:, i]) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4[:, i]), last_alive = b;
+      if (b < J) {
+        int ii = I + i, bp1 = b + 1;
+        log_1mphi[b:] = log1m_exp(log_phi[b:, ii]);
+        log_1mp[bp1:] = log1m_inv_logit(logit_p[bp1:, ii]);
+        Omega[:, bp1] = [ log_phi[b, ii] + log_1mp[bp1], 
+                          log_1mphi[b] ]';
+        for (j in bp1:Jm1) {
+          int jp1 = j + 1;
+          log_H[1] = [ log_phi[j, ii], log_1mphi[j] ];
+          Omega[:, jp1] = log_prod_exp(log_H', Omega[:, j]);
+          Omega[1, jp1] += log_1mp[jp1];
+        }
+        int z = categorical_logit_rng(Omega[:, J]);
+        if (z == 1) {
+          last_alive = J;
+        } else {
+          if (b < Jm1) {
+            int JJ = Jm1 - b;
+            array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+            for (j in reverse(idx)) {
+              Omega[1, j] += log_1mphi[j];
+              z = categorical_logit_rng(Omega[:, j]);
+              if (z == 1) {
+                last_alive = j;
+                break;
+              }
+            }
+          }
+        }
+      }
+      B[b] += 1;
+      for (j in b:last_alive) {
+        N[j] += 1;
+      }
+      if (last_alive < J) {
+        D[last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * As js_rng() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(array[] int, array[] int, array[] int, int) 
+  js2_rng(tuple(vector, vector, matrix, vector) lp, data array[,] int f_l, 
+          matrix log_phi, matrix logit_p, data int I_aug) {
+  int I = size(lp.1), Ip1 = I + 1, J = rows(lp.3), Jm1 = J - 1;
+  vector[Jm1] log_1mphi;
+  vector[J] log_1mp;
+  array[J] int N = zeros_int_array(J), B = zeros_int_array(J), 
+               D = zeros_int_array(J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], last_alive = l;
+    matrix[2, 2] log_H;
+    log_H[2] = [ negative_infinity(), 0 ];
+    matrix[2, J] Omega;
+    if (l < J) {
+      int lp1 = l + 1;
+      log_1mphi[l:] = log1m_exp(log_phi[l:, i]);
+      log_1mp[lp1:] = log1m_inv_logit(logit_p[lp1:, i]);
+      Omega[:, lp1] = [ log_phi[l, i] + log_1mp[lp1], 
+                        log_1mphi[l] ]';
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        log_H[1] = [ log_phi[j, i], log_1mphi[j] ];
+        Omega[:, jp1] = log_prod_exp(log_H', Omega[:, j]);
+        Omega[1, jp1] += log_1mp[jp1];
+      }
+      int z = categorical_logit_rng(Omega[:, J]);
+      if (z == 1) {
+        last_alive = J;
+      } else {
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            Omega[1, j] += log_1mphi[j];
+            z = categorical_logit_rng(Omega[:, j]);
+            if (z == 1) {
+              last_alive = j;
+              break;
+            }
+          }
+        }
+      }
+    }
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]);
+    B[b] += 1;
+    for (j in b:last_alive) {
+      N[j] += 1;
+    }
+    if (last_alive < J) {
+      D[last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  log_1mphi = log1m_exp(log_phi[:, Ip1]);
+  array[Jm1] matrix[2, 2] log_H;
+  for (j in 1:Jm1) {
+    log_H[j] = [[ log_phi[j, Ip1], log_1mphi[j] ],
+                [ negative_infinity(), 0 ]];
+  }
+  log_1mp = log1m_inv_logit(logit_p[:, Ip1]);
+  array[Jm1] matrix[2, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    Omega[b, :, bp1] = log_H[b, 1]';
+    Omega[b, 1, bp1] += log_1mp[bp1];
+    for (j in bp1:Jm1) {
+      int jp1 = j + 1;
+      Omega[b, :, jp1] = log_prod_exp(log_H[j]', Omega[b, :, j]);
+      Omega[b, 1, jp1] += log_1mp[jp1];
+    }
+  }
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b;
+      if (b < J) {
+        int z = categorical_logit_rng(Omega[b, :, J]);
+        if (z == 1) {
+          last_alive = J;
+        } else {
+          if (b < Jm1) {
+            int JJ = Jm1 - b;
+            array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+            for (j in reverse(idx)) {
+              z = categorical_logit_rng(Omega[b, :, j] + log_H[j, :, 2]);
+              if (z == 1) {
+                last_alive = j;
+                break;
+              }
+            }
+          }
+        }
+      }
+      B[b] += 1;
+      for (j in b:last_alive) {
+        N[j] += 1;
+      }
+      if (last_alive < J) {
+        D[last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * Robust design Jolly-Seber population sizes, number of entries and exits, and 
+ * super-population using the forward-backward sampling algorithm. Function is 
+ * overloaded:
+ *  1. log_phi and logit_p per survey/secondary
+ *  2. log_phi and logit_p per individual and survey/secondary
+ * 
+ * @param lp       Output of js_rd()
+ * @param f_l      First and last primary detected [I, 2]
+ * @param K        Number of secondaries [J]
+ * @param log_phi  Log survival probabilities [(I, )J - 1]
+ * @param logit_p  Detection logits [(I, )K_max, J]
+ * @param I_aug    Number of augmented individuals
+ 
+ * @return N        Population sizes [J]
+ * @return B        Number of entries [J]
+ * @return D        Number of exits [J]
+ * @return N_super  Super-population
+ */
+tuple(array[] int, array[] int, array[] int, int) 
+  js_rd_rng(tuple(vector, vector, matrix, vector) lp, data array[,] int f_l, 
+            data array[] int K, vector log_phi, matrix logit_p, 
+            data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, K_max = max(K);
+  vector[Jm1] log_1mphi = log1m_exp(log_phi);
+  array[Jm1] matrix[2, 2] log_H;
+  for (j in 1:Jm1) {
+    log_H[j] = [[ log_phi[j], log_1mphi[j] ],
+                [ negative_infinity(), 0 ]];
+  }
+  vector[J] log_1mp;
+  for (j in 1:J) {
+    log_1mp[j] = sum(log1m_inv_logit(logit_p[:K[j], j]));
+  }
+  array[Jm1] matrix[2, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    Omega[b, :, bp1] = log_H[b, 1]';
+    Omega[b, 1, bp1] += log_1mp[bp1];
+    for (j in bp1:Jm1) {
+      int jp1 = j + 1;
+      Omega[b, :, jp1] = log_prod_exp(log_H[j]', Omega[b, :, j]);
+      Omega[b, 1, jp1] += log_1mp[jp1];
+    }
+  }
+  array[J] int N = zeros_int_array(J), B = zeros_int_array(J), 
+               D = zeros_int_array(J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], last_alive = l;
+    if (l < J) {
+      int z = categorical_logit_rng(Omega[l, :, J]);
+      if (z == 1) {
+        last_alive = J;
+      } else {
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, l + 1, Jm1);
+          for (j in reverse(idx)) {
+            z = categorical_logit_rng(Omega[l, :, j] + log_H[j, :, 2]);
+            if (z == 1) {
+              last_alive = j;
+              break;
+            }
+          }
+        }
+      }
+    }
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]);
+    B[b] += 1;
+    for (j in b:last_alive) {
+      N[j] += 1;
+    }
+    if (last_alive < J) {
+      D[last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b;
+      if (b < J) {
+        int bp1 = b + 1;
+        int z = categorical_logit_rng(Omega[b, :, J]);
+        if (z == 1) {
+          last_alive = J;
+        } else {
+          if (bp1 < J) {
+            int JJ = Jm1 - b;
+            array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+            for (j in reverse(idx)) {
+              z = categorical_logit_rng(Omega[b, :, j] + log_H[j, :, 2]);
+              if (z == 1) {
+                last_alive = j;
+                break;
+              }
+            }
+          }
+        }
+      }
+      B[b] += 1;
+      for (j in b:last_alive) {
+        N[j] += 1;
+      }
+      if (last_alive < J) {
+        D[last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+tuple(array[] int, array[] int, array[] int, int) 
+  js_rd_rng(tuple(vector, matrix, matrix, matrix) lp, data array[,] int f_l, 
+            data array[] int K, matrix log_phi, array[] matrix logit_p,
+            data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, K_max = max(K);
+  vector[Jm1] log_1mphi;
+  matrix[K_max, J] logit_p_i;
+  matrix[2, 2] log_H;
+  log_H[2] = [ negative_infinity(), 0 ];
+  vector[J] log_1mp;
+  array[J] int N = zeros_int_array(J), B = zeros_int_array(J), 
+               D = zeros_int_array(J);
+  matrix[2, J] Omega;
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], last_alive = l;
+    if (l < J) {
+      int lp1 = l + 1;
+      log_1mphi[l:] = log1m_exp(log_phi[l:, i]);
+      logit_p_i[:, lp1:] = logit_p[i, :, lp1:];
+      for (j in lp1:J) {
+        log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+      }
+      Omega[:, lp1] = [ log_phi[l, i] + log_1mp[lp1], 
+                        log_1mphi[l] ]';
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        log_H[1] = [ log_phi[j, i], log_1mphi[j] ];
+        Omega[:, jp1] = log_prod_exp(log_H', Omega[:, j]);
+        Omega[1, jp1] += log_1mp[jp1];
+      }
+      int z = categorical_logit_rng(Omega[:, J]);
+      if (z == 1) {
+        last_alive = J;
+      } else {
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            Omega[1, j] += log_1mphi[j];
+            z = categorical_logit_rng(Omega[:, j]);
+            if (z == 1) {
+              last_alive = j;
+              break;
+            }
+          }
+        }
+      }
+    }
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]);
+    B[b] += 1;
+    for (j in b:last_alive) {
+      N[j] += 1;
+    }
+    if (last_alive < J) {
+      D[last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2[:, i]) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4[:, i]), last_alive = b;
+      if (b < J) {
+        int ii = I + i, bp1 = b + 1;
+        log_1mphi[b:] = log1m_exp(log_phi[b:, ii]);
+        logit_p_i[:, bp1:] = logit_p[ii, :, bp1:];
+        for (j in bp1:J) {
+          log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+        }
+        Omega[:, bp1] = [ log_phi[b, ii] + log_1mp[bp1], 
+                          log_1mphi[b] ]';
+        for (j in bp1:Jm1) {
+          int jp1 = j + 1;
+          log_H[1] = [ log_phi[j, ii], log_1mphi[j] ];
+          Omega[:, jp1] = log_prod_exp(log_H', Omega[:, j]);
+          Omega[1, jp1] += log_1mp[jp1];
+        }
+        int z = categorical_logit_rng(Omega[:, J]);
+        if (z == 1) {
+          last_alive = J;
+        } else {
+          if (b < Jm1) {
+            int JJ = Jm1 - b;
+            array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+            for (j in reverse(idx)) {
+              Omega[1, j] += log_1mphi[j];
+              z = categorical_logit_rng(Omega[:, j]);
+              if (z == 1) {
+                last_alive = j;
+                break;
+              }
+            }
+          }
+        }
+      }
+      B[b] += 1;
+      for (j in b:last_alive) {
+        N[j] += 1;
+      }
+      if (last_alive < J) {
+        D[last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * As js_rd2_rng() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(array[] int, array[] int, array[] int, int) 
+  js_rd2_rng(tuple(vector, vector, matrix, vector) lp, data array[,] int f_l, 
+             data array[] int K, matrix log_phi, array[] matrix logit_p,
+             data int I_aug) {
+  int I = size(lp.1), Ip1 = I + 1, J = rows(lp.3), Jm1 = J - 1, K_max = max(K);
+  vector[Jm1] log_1mphi;
+  matrix[K_max, J] logit_p_i;
+  vector[J] log_1mp;
+  array[J] int N = zeros_int_array(J), B = zeros_int_array(J), 
+               D = zeros_int_array(J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], last_alive = l;
+    matrix[2, 2] log_H;
+    log_H[2] = [ negative_infinity(), 0 ];
+    matrix[2, J] Omega;
+    if (l < J) {
+      int lp1 = l + 1;
+      log_1mphi[l:] = log1m_exp(log_phi[l:, i]);
+      logit_p_i[:, lp1:] = logit_p[i, :, lp1:];
+      for (j in lp1:J) {
+        log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+      }
+      Omega[:, lp1] = [ log_phi[l, i] + log_1mp[lp1], 
+                        log_1mphi[l] ]';
+      for (j in lp1:Jm1) {
+        int jp1 = j + 1;
+        log_H[1] = [ log_phi[j, i], log_1mphi[j] ];
+        Omega[:, jp1] = log_prod_exp(log_H', Omega[:, j]);
+        Omega[1, jp1] += log_1mp[jp1];
+      }
+      int z = categorical_logit_rng(Omega[:, J]);
+      if (z == 1) {
+        last_alive = J;
+      } else {
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            Omega[1, j] += log_1mphi[j];
+            z = categorical_logit_rng(Omega[:, j]);
+            if (z == 1) {
+              last_alive = j;
+              break;
+            }
+          }
+        }
+      }
+    }
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]);
+    B[b] += 1;
+    for (j in b:last_alive) {
+      N[j] += 1;
+    }
+    if (last_alive < J) {
+      D[last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  log_1mphi = log1m_exp(log_phi[:, Ip1]);
+  logit_p_i = logit_p[Ip1];
+  array[Jm1] matrix[2, 2] log_H;
+  for (j in 1:Jm1) {
+    log_H[j] = [[ log_phi[j, Ip1], log_1mphi[j] ],
+                [ negative_infinity(), 0 ]];
+  }
+  for (j in 1:J) {
+    log_1mp[j] = sum(log1m_inv_logit(logit_p_i[:K[j], j]));
+  }
+  array[Jm1] matrix[2, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    Omega[b, :, bp1] = log_H[b, 1]';
+    Omega[b, 1, bp1] += log_1mp[bp1];
+    for (j in bp1:Jm1) {
+      int jp1 = j + 1;
+      Omega[b, :, jp1] = log_prod_exp(log_H[j]', Omega[b, :, j]);
+      Omega[b, 1, jp1] += log_1mp[jp1];
+    }
+  }
+  
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b;
+      if (b < J) {
+        int bp1 = b + 1;
+        int z = categorical_logit_rng(Omega[b, :, J]);
+        if (z == 1) {
+          last_alive = J;
+        } else {
+          if (bp1 < J) {
+            int JJ = Jm1 - b;
+            array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+            for (j in reverse(idx)) {
+              z = categorical_logit_rng(Omega[b, :, j] + log_H[j, :, 2]);
+              if (z == 1) {
+                last_alive = j;
+                break;
+              }
+            }
+          }
+        }
+      }
+      B[b] += 1;
+      for (j in b:last_alive) {
+        N[j] += 1;
+      }
+      if (last_alive < J) {
+        D[last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * Multistate Jolly-Seber population sizes, number of entries and exits, and 
+ * super-population using the forward-backward sampling algorithm. Function is 
+ * overloaded:
+ *  1. log_H and logit_p per survey
+ *  2. log_H and logit_p per individual and survey
+ * 
+ * @param lp       Output of js_ms()
+ * @param y        Detection history [I, J]
+ * @param f_l      First and last survey detected [I, 2]
+ * @param log_H    Log transition matrices [(I, )J - 1, S + 1, S + 1]
+ * @param logit_p  Detection logits [(I, )S, J]
+ * @param I_aug    Number of augmented individuals
+ 
+ * @return N        Population sizes [S, J]
+ * @return B        Number of entries [S, J]
+ * @return D        Number of exits [S, J]
+ * @return N_super  Super-population
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_ms_rng(tuple(vector, vector, matrix, vector, array[] matrix, matrix) lp, 
+            data array[,] int y, data array[,] int f_l, array[] matrix log_H,
+            matrix logit_p, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, Sp1 = rows(log_H[1]), 
+      S = Sp1 - 1;
+  matrix[Sp1, J] log_1mp = append_row(log1m_inv_logit(logit_p),
+                                      zeros_row_vector(J));
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, y_j = y[i, f],
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = b == f ? y_j : categorical_logit_rng(lp.5[i, :, b]);
+    z = y[i];
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      if (l < J) {
+        Omega[:, lp1] = log_H[l, z[l]]' + log_1mp[:, lp1];
+        for (j in lp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j] 
+                                         + log_H[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      if (f < lm1) {
+        y_j = z[f];
+        Omega[:S, f] = rep_vector(negative_infinity(), S);
+        Omega[y_j, f] = 0;
+        for (j in fp1:lm1) {
+          int jm1 = j - 1, y_jm1 = y_j;
+          y_j = z[j];
+          if (y_j) {
+            real lp_j = y_jm1 ?
+                        Omega[y_jm1, jm1] + log_H[jm1, y_jm1, y_j]
+                        : log_sum_exp(Omega[:S, jm1] + log_H[jm1, :S, y_j]);
+            Omega[:S, j] = rep_vector(negative_infinity(), S);
+            Omega[y_j, j] = lp_j + log_1mp[y_j, j] + logit_p[y_j, j];
+          } else {
+            Omega[:S, j] = y_jm1 ?
+                           Omega[y_jm1, jm1] + log_H[jm1, y_jm1, :S]'
+                           : log_prod_exp(log_H[jm1, :S, :S]', Omega[:S, jm1]);
+            Omega[:S, j] += log_1mp[:S, j];
+          }
+        }
+        int JJ = lm1 - f;
+        array[JJ] int idx = linspaced_int_array(JJ, fp1, lm1);
+        for (j in reverse(idx)) {
+          if (!z[j]) {
+            z[j] = categorical_logit_rng(Omega[:S, j] + log_H[j, :S, z[j + 1]]);
+          }
+        }
+      }
+      if (b < fm1) {
+        Omega[:S, bp1] = log_H[b, a, :S]' + log_1mp[:S, bp1];
+        for (j in bp1 + 1:fm1) {
+          int jm1 = j - 1;
+          Omega[:S, j] = log_prod_exp(log_H[jm1, :S, :S]', Omega[:S, jm1])
+                         + log_1mp[:S, j];
+        }
+        int JJ = fm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, fm1);
+        for (j in reverse(idx)) {
+          z[j] = categorical_logit_rng(Omega[:S, j] + log_H[j, :S, z[j + 1]]);
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (s in 1:S) {
+      Omega[b, s, :, bp1] = log_H[b, s]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, s, :, jp1] = log_prod_exp(log_H[j]', Omega[b, s, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b, 
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        } 
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j] 
+                                         + log_H[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_ms_rng(tuple(vector, matrix, matrix, matrix, array[] matrix, 
+            array[] matrix) lp, data array[,] int y, data array[,] int f_l, 
+            array[,] matrix log_H, array[] matrix logit_p, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, Sp1 = rows(log_H[1, 1]), 
+      S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  matrix[Sp1, J] Omega;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, y_j = y[i, f],
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = b == f ? y_j : categorical_logit_rng(lp.5[i, :, b]);
+    z = y[i];
+    log_H_i = log_H[i];
+    log_1mp[:S] = log1m_inv_logit(logit_p[i]);
+    if (b < J) {
+      if (l < J) {
+        Omega[:, lp1] = log_H_i[l, z[l]]' + log_1mp[:, lp1];
+        for (j in lp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H_i[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j] 
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      if (f < lm1) {
+        y_j = z[f];
+        Omega[:S, f] = rep_vector(negative_infinity(), S);
+        Omega[y_j, f] = 0;
+        for (j in fp1:lm1) {
+          int jm1 = j - 1, y_jm1 = y_j;
+          y_j = z[j];
+          if (y_j) {
+            real lp_j = y_jm1 ?
+                        Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, y_j]
+                        : log_sum_exp(Omega[:S, jm1] + log_H_i[jm1, :S, y_j]);
+            Omega[:S, j] = rep_vector(negative_infinity(), S);
+            Omega[y_j, j] = lp_j + log_1mp[y_j, j] + logit_p[i, y_j, j];
+          } else {
+            Omega[:S, j] = y_jm1 ?
+                           Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, :S]'
+                           : log_prod_exp(log_H_i[jm1, :S, :S]', 
+                                          Omega[:S, jm1]);
+            Omega[:S, j] += log_1mp[:S, j];
+          }
+        }
+        int JJ = lm1 - f;
+        array[JJ] int idx = linspaced_int_array(JJ, fp1, lm1);
+        for (j in reverse(idx)) {
+          if (!z[j]) {
+            z[j] = categorical_logit_rng(Omega[:S, j] 
+                                         + log_H_i[j, :S, z[j + 1]]);
+          }
+        }
+      }
+      if (b < fm1) {
+        Omega[:S, bp1] = log_H_i[b, a, :S]' + log_1mp[:S, bp1];
+        for (j in bp1 + 1:fm1) {
+          int jm1 = j - 1;
+          Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                         + log_1mp[:S, j];
+        }
+        int JJ = fm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, fm1);
+        for (j in reverse(idx)) {
+          z[j] = categorical_logit_rng(Omega[:S, j] + log_H_i[j, :S, z[j + 1]]);
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    if (categorical_logit_rng(lp.2[:, i]) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4[:, i]), last_alive = b, 
+          a = categorical_logit_rng(lp.6[i, :, b]);
+      if (b < J) {
+        int bp1 = b + 1;
+        log_H_i[b:] = log_H[ii, b:];
+        log_1mp[:S, bp1:] = log1m_inv_logit(logit_p[ii, :, bp1:]);
+        Omega[:, bp1] = log_H_i[b, a]' + log_1mp[:, bp1];
+        for (j in bp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H_i[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        } 
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j] 
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * As js_ms_rng() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_ms2_rng(tuple(vector, vector, matrix, vector, array[] matrix, matrix) lp, 
+             data array[,] int y, data array[,] int f_l, array[,] matrix log_H, 
+             array[] matrix logit_p, data int I_aug) {
+  int I = size(lp.1), Ip1 = I + 1, J = rows(lp.3), Jm1 = J - 1, 
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, y_j = y[i, f],
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = b == f ? y_j : categorical_logit_rng(lp.5[i, :, b]);
+    z = y[i];
+    log_H_i = log_H[i];
+    log_1mp[:S] = log1m_inv_logit(logit_p[i]);
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      if (l < J) {
+        Omega[:, lp1] = log_H_i[l, z[l]]' + log_1mp[:, lp1];
+        for (j in lp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H_i[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j] 
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      if (f < lm1) {
+        y_j = z[f];
+        Omega[:S, f] = rep_vector(negative_infinity(), S);
+        Omega[y_j, f] = 0;
+        for (j in fp1:lm1) {
+          int jm1 = j - 1, y_jm1 = y_j;
+          y_j = z[j];
+          if (y_j) {
+            real lp_j = y_jm1 ?
+                        Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, y_j]
+                        : log_sum_exp(Omega[:S, jm1] + log_H_i[jm1, :S, y_j]);
+            Omega[:S, j] = rep_vector(negative_infinity(), S);
+            Omega[y_j, j] = lp_j + log_1mp[y_j, j] + logit_p[i, y_j, j];
+          } else {
+            Omega[:S, j] = y_jm1 ?
+                           Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, :S]'
+                           : log_prod_exp(log_H_i[jm1, :S, :S]', 
+                                          Omega[:S, jm1]);
+            Omega[:S, j] += log_1mp[:S, j];
+          }
+        }
+        int JJ = lm1 - f;
+        array[JJ] int idx = linspaced_int_array(JJ, fp1, lm1);
+        for (j in reverse(idx)) {
+          if (!z[j]) {
+            z[j] = categorical_logit_rng(Omega[:S, j] 
+                                         + log_H_i[j, :S, z[j + 1]]);
+          }
+        }
+      }
+      if (b < fm1) {
+        Omega[:S, bp1] = log_H_i[b, a, :S]' + log_1mp[:S, bp1];
+        for (j in bp1 + 1:fm1) {
+          int jm1 = j - 1;
+          Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                         + log_1mp[:S, j];
+        }
+        int JJ = fm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, fm1);
+        for (j in reverse(idx)) {
+          z[j] = categorical_logit_rng(Omega[:S, j] + log_H_i[j, :S, z[j + 1]]);
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  log_H_i = log_H[Ip1];
+  log_1mp[:S] = log1m_inv_logit(logit_p[Ip1]);
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega[b, a, :, bp1] = log_H_i[b, a]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, a, :, jp1] = log_prod_exp(log_H_i[j]', Omega[b, a, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b, 
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j] 
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * Robust design multistate Jolly-Seber population sizes, number of entries and 
+ * exits, and super-population using the forward-backward sampling algorithm. 
+ * Function is overloaded:
+ *  1. log_H and logit_p per survey/secondary
+ *  2. log_H and logit_p per individual and survey/secondary
+ * 
+ * @param lp       Output of js_ms_rd()
+ * @param y        Detection history [I, J, K_max]
+ * @param f_l      First and last survey detected [I, 2]
+ * @param K        Number of secondaries [J]
+ * @param log_H    Log transition matrices [(I, )J - 1, S + 1, S + 1]
+ * @param logit_p  Detection logits [(I, )J, S, K_max]
+ * @param I_aug    Number of augmented individuals
+ 
+ * @return N        Population sizes [S, J]
+ * @return B        Number of entries [S, J]
+ * @return D        Number of exits [S, J]
+ * @return N_super  Super-population
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_ms_rd_rng(tuple(vector, vector, matrix, vector, array[] matrix, matrix) lp, 
+               data array[,,] int y, data array[,] int f_l, data array[] int K,
+               array[] matrix log_H, array[] matrix logit_p, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1]), S = Sp1 - 1;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p[j, s, :K_j]));
+    }
+  }
+  array[J, K_max] int y_i;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l;
+    y_i[f:l] = y[i, f:l];
+    z[f] = max(y_i[f]);
+    z[l] = max(y_i[l]);
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = b == f ? z[f] : categorical_logit_rng(lp.5[i, :, b]);
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      if (l < J) {
+        Omega[:, lp1] = log_H[l, z[l]]' + log_1mp[:, lp1];
+        for (j in lp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j] 
+                                         + log_H[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      if (f < lm1) {
+        Omega[:S, f] = rep_vector(negative_infinity(), S);
+        Omega[z[f], f] = 0;
+        for (j in fp1:lm1) {
+          int y_j = max(y_i[j]), jm1 = j - 1, y_jm1 = z[jm1];
+          z[j] = y_j;
+          if (y_j) {
+            real lp_j = y_jm1 ?
+                        Omega[y_jm1, jm1] + log_H[jm1, y_jm1, y_j]
+                        : log_sum_exp(Omega[:S, jm1] + log_H[jm1, :S, y_j]);
+            Omega[:S, j] = rep_vector(negative_infinity(), S);
+            Omega[y_j, j] = lp_j + log_1mp[y_j, j];
+            for (k in 1:K[j]) {
+              Omega[y_j, j] = (y_i[j, k] == y_j) * logit_p[j, y_j, k];
+            }
+          } else {
+            Omega[:S, j] = y_jm1 ?
+                           Omega[y_jm1, jm1] + log_H[jm1, y_jm1, :S]'
+                           : log_prod_exp(log_H[jm1, :S, :S]', Omega[:S, jm1]);
+            Omega[:S, j] += log_1mp[:S, j];
+          }
+        }
+        int JJ = lm1 - f;
+        array[JJ] int idx = linspaced_int_array(JJ, fp1, lm1);
+        for (j in reverse(idx)) {
+          if (!z[j]) {
+            z[j] = categorical_logit_rng(Omega[:S, j] + log_H[j, :S, z[j + 1]]);
+          }
+        }
+      }
+      if (b < fm1) {
+        Omega[:S, bp1] = log_H[b, a, :S]' + log_1mp[:S, bp1];
+        for (j in bp1 + 1:fm1) {
+          int jm1 = j - 1;
+          Omega[:S, j] = log_prod_exp(log_H[jm1, :S, :S]', Omega[:S, jm1])
+                         + log_1mp[:S, j];
+        }
+        int JJ = fm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, fm1);
+        for (j in reverse(idx)) {
+          z[j] = categorical_logit_rng(Omega[:S, j] + log_H[j, :S, z[j + 1]]);
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (s in 1:S) {
+      Omega[b, s, :, bp1] = log_H[b, s]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, s, :, jp1] = log_prod_exp(log_H[j]', Omega[b, s, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b, 
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        } 
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j] 
+                                         + log_H[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_ms_rd_rng(tuple(vector, matrix, matrix, matrix, array[] matrix, 
+               array[] matrix) lp, data array[,,] int y, data array[,] int f_l, 
+               data array[] int K, array[,] matrix log_H, 
+               array[,] matrix logit_p, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  matrix[Sp1, J] Omega;
+  array[J, K_max] int y_i;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l;
+    y_i[f:l] = y[i, f:l];
+    z[f] = max(y_i[f]);
+    z[l] = max(y_i[l]);
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = b == f ? z[f] : categorical_logit_rng(lp.5[i, :, b]);
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    if (b < J) {
+      if (l < J) {
+        Omega[:, lp1] = log_H_i[l, z[l]]' + log_1mp[:, lp1];
+        for (j in lp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H_i[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      if (f < lm1) {
+        Omega[:S, f] = rep_vector(negative_infinity(), S);
+        Omega[z[f], f] = 0;
+        for (j in fp1:lm1) {
+          int y_j = max(y_i[j]), jm1 = j - 1, y_jm1 = z[jm1];
+          z[j] = y_j;
+          if (y_j) {
+            real lp_j = y_jm1 ?
+                        Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, y_j]
+                        : log_sum_exp(Omega[:S, jm1] + log_H_i[jm1, :S, y_j]);
+            Omega[:S, j] = rep_vector(negative_infinity(), S);
+            Omega[y_j, j] = lp_j + log_1mp[y_j, j];
+            for (k in 1:K[j]) {
+              Omega[y_j, j] += (y_i[j, k] == y_j) * logit_p[i, j, y_j, k];
+            }
+          } else {
+            Omega[:S, j] = y_jm1 ?
+                           Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, :S]'
+                           : log_prod_exp(log_H_i[jm1, :S, :S]', 
+                                          Omega[:S, jm1]);
+            Omega[:S, j] += log_1mp[:S, j];
+          }
+        }
+        int JJ = lm1 - f;
+        array[JJ] int idx = linspaced_int_array(JJ, fp1, lm1);
+        for (j in reverse(idx)) {
+          if (!z[j]) {
+            z[j] = categorical_logit_rng(Omega[:S, j] 
+                                         + log_H_i[j, :S, z[j + 1]]);
+          }
+        }
+      }
+      if (b < fm1) {
+        Omega[:S, bp1] = log_H_i[b, a, :S]' + log_1mp[:S, bp1];
+        for (j in bp1 + 1:fm1) {
+          int jm1 = j - 1;
+          Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                         + log_1mp[:S, j];
+        }
+        int JJ = fm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, fm1);
+        for (j in reverse(idx)) {
+          z[j] = categorical_logit_rng(Omega[:S, j] + log_H_i[j, :S, z[j + 1]]);
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    if (categorical_logit_rng(lp.2[:, i]) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4[:, i]), last_alive = b, 
+          a = categorical_logit_rng(lp.6[i, :, b]);
+      if (b < J) {
+        int bp1 = b + 1;
+        log_H_i = log_H[ii];
+        logit_p_i = logit_p[ii];
+        for (j in 1:J) {
+          int K_j = K[j];
+          for (s in 1:S) {
+            log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+          }
+        }
+        Omega[:, bp1] = log_H_i[b, a]' + log_1mp[:, bp1];
+        for (j in bp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H_i[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        } 
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j] 
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * As js_ms_rd_rng() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_ms_rd2_rng(tuple(vector, vector, matrix, vector, array[] matrix, 
+                      matrix) lp, data array[,,] int y, data array[,] int f_l, 
+                data array[] int K, array[,] matrix log_H, 
+                array[,] matrix logit_p, data int I_aug) {
+  int I = size(lp.1), Ip1 = I + 1, J = rows(lp.3), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  array[J, K_max] int y_i;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l;
+    y_i[f:l] = y[i, f:l];
+    z[f] = max(y_i[f]);
+    z[l] = max(y_i[l]);
+    int b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = b == f ? z[f] : categorical_logit_rng(lp.5[i, :, b]);
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      if (l < J) {
+        Omega[:, lp1] = log_H_i[l, z[l]]' + log_1mp[:, lp1];
+        for (j in lp1:Jm1) {
+          int jp1 = j + 1;
+          Omega[:, jp1] = log_prod_exp(log_H_i[j]', Omega[:, j]) 
+                          + log_1mp[:, jp1];
+        }
+        z[J] = categorical_logit_rng(Omega[:, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (l < Jm1) {
+          int JJ = Jm1 - l;
+          array[JJ] int idx = linspaced_int_array(JJ, lp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[:S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      if (f < lm1) {
+        Omega[:S, f] = rep_vector(negative_infinity(), S);
+        Omega[z[f], f] = 0;
+        for (j in fp1:lm1) {
+          int y_j = max(y_i[j]), jm1 = j - 1, y_jm1 = z[jm1];
+          z[j] = y_j;
+          if (y_j) {
+            real lp_j = y_jm1 ?
+                        Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, y_j]
+                        : log_sum_exp(Omega[:S, jm1] + log_H_i[jm1, :S, y_j]);
+            Omega[:S, j] = rep_vector(negative_infinity(), S);
+            Omega[y_j, j] = lp_j + log_1mp[y_j, j];
+            for (k in 1:K[j]) {
+              Omega[y_j, j] += (y_i[j, k] == y_j) * logit_p[i, j, y_j, k];
+            }
+          } else {
+            Omega[:S, j] = y_jm1 ?
+                           Omega[y_jm1, jm1] + log_H_i[jm1, y_jm1, :S]'
+                           : log_prod_exp(log_H_i[jm1, :S, :S]', 
+                                          Omega[:S, jm1]);
+            Omega[:S, j] += log_1mp[:S, j];
+          }
+        }
+        int JJ = lm1 - f;
+        array[JJ] int idx = linspaced_int_array(JJ, fp1, lm1);
+        for (j in reverse(idx)) {
+          if (!z[j]) {
+            z[j] = categorical_logit_rng(Omega[:S, j] 
+                                         + log_H_i[j, :S, z[j + 1]]);
+          }
+        }
+      }
+      if (b < fm1) {
+        Omega[:S, bp1] = log_H_i[b, a, :S]' + log_1mp[:S, bp1];
+        for (j in bp1 + 1:fm1) {
+          int jm1 = j - 1;
+          Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                         + log_1mp[:S, j];
+        }
+        int JJ = fm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, fm1);
+        for (j in reverse(idx)) {
+          z[j] = categorical_logit_rng(Omega[:S, j] + log_H_i[j, :S, z[j + 1]]);
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  log_H_i = log_H[Ip1];
+  logit_p_i = logit_p[Ip1];
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+    }
+  }
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega[b, a, :, bp1] = log_H_i[b, a]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, a, :, jp1] = log_prod_exp(log_H_i[j]', Omega[b, a, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b, 
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j] 
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * Multievent Jolly-Seber population sizes, number of entries and exits, and 
+ * super-population using the forward-backward sampling algorithm. Function is 
+ * overloaded:
+ *  1. log_P and logit_p per survey
+ *  2. log_P and logit_p per individual and survey
+ * 
+ * @param lp       Output of js_me()
+ * @param y        Detection history [I, J]
+ * @param f_l      First and last survey detected [I, 2]
+ * @param log_H    Log transition matrices [(I, )J - 1, S + 1, S + 1]
+ * @param logit_p  Detection logits [(I, )S, J]
+ * @param log_E    Log event matrix [(I, )J, S, S]
+ * @param I_aug    Number of augmented individuals
+ 
+ * @return N        Population sizes [S, J]
+ * @return B        Number of entries [S, J]
+ * @return D        Number of exits [S, J]
+ * @return N_super  Super-population
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_me_rng(tuple(vector, vector, matrix, vector, array[] matrix, matrix) lp,
+            data array[,] int y, data array[,] int f_l, array[] matrix log_H,
+            matrix logit_p, array[] matrix log_E, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, Sp1 = rows(log_H[1]), 
+      S = Sp1 - 1;
+  matrix[Sp1, J] log_1mp = append_row(log1m_inv_logit(logit_p),
+                                      zeros_row_vector(J));
+  matrix[S, J] log_p = log_1mp[:S] + logit_p;
+  array[J] int y_i, z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, 
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = categorical_rng(softmax(lp.5[i, :, b]));
+    y_i[:l] = y[i, :l];
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+      Omega[a, b] = 0;
+      for (j in bp1:l) {
+        int jm1 = j - 1, y_j = y_i[j];
+        Omega[:S, j] = log_prod_exp(log_H[jm1, :S, :S]', Omega[:S, jm1]);
+        Omega[:S, j] += y_j ? log_p[:, j] + log_E[j, :, y_j] : log_1mp[:S, j];
+      }
+      Omega[Sp1, l] = negative_infinity();
+      for (j in lp1:J) {
+        int jm1 = j - 1;
+        Omega[:, j] = log_prod_exp(log_H[jm1]', Omega[:, jm1]) + log_1mp[:, j];
+      }
+      z[J] = categorical_rng(softmax(Omega[:, J]));
+      if (z[J] <= S) {
+        last_alive = J;
+      }
+      if (b < Jm1) {
+        int JJ = Jm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+        for (j in reverse(idx)) {
+          int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+          z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                         + log_H[j, :S_max, z[jp1]]));
+          if (z[j] <= S && z[jp1] == Sp1) {
+            last_alive = j;
+          }
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega[b, a, :, bp1] = log_H[b, a]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, a, :, jp1] = log_prod_exp(log_H[j]', Omega[b, a, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b,
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j]
+                                         + log_H[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_me_rng(tuple(vector, matrix, matrix, matrix, array[] matrix, 
+                  array[] matrix) lp, data array[,] int y, 
+            data array[,] int f_l, array[,] matrix log_H, 
+            array[] matrix logit_p, array[,] matrix log_E, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, Sp1 = rows(log_H[1, 1]), 
+      S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  array[J] matrix[S, S] log_E_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J), Omega;
+  array[J] int y_i, z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, 
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = categorical_rng(softmax(lp.5[i, :, b]));
+    y_i[:l] = y[i, :l];
+    log_H_i = log_H[i];
+    log_E_i[f:l] = log_E[i, f:l];
+    log_1mp[:S] = log1m_inv_logit(logit_p[i]);
+    if (b < J) {
+      Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+      Omega[a, b] = 0;
+      for (j in bp1:l) {
+        int jm1 = j - 1, y_j = y_i[j];
+        Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                       + log_1mp[:S, j];
+        if (y_j) {
+          Omega[:S, j] += logit_p[i, :, j] + log_E_i[j, :, y_j];
+        }
+      }
+      Omega[Sp1, l] = negative_infinity();
+      for (j in lp1:J) {
+        int jm1 = j - 1;
+        Omega[:, j] = log_prod_exp(log_H_i[jm1]', Omega[:, jm1]) 
+                      + log_1mp[:, j];
+      }
+      z[J] = categorical_rng(softmax(Omega[:, J]));
+      if (z[J] <= S) {
+        last_alive = J;
+      }
+      if (b < Jm1) {
+        int JJ = Jm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+        for (j in reverse(idx)) {
+          int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+          z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]));
+          if (z[j] <= S && z[jp1] == Sp1) {
+            last_alive = j;
+          }
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    if (categorical_logit_rng(lp.2[:, i]) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4[:, i]), bp1 = b + 1, last_alive = b, 
+          a = categorical_logit_rng(lp.6[i, :, b]);
+      log_H_i = log_H[ii];
+      log_1mp[:S] = log1m_inv_logit(logit_p[ii]);
+      if (b < J) {
+        Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+        Omega[a, b] = 0;
+        for (j in bp1:J) {
+          int jm1 = j - 1;
+          Omega[:, j] = log_prod_exp(log_H_i[jm1]', Omega[:, jm1])
+                        + log_1mp[:, j];
+        }
+        z[J] = categorical_rng(softmax(Omega[:, J]));
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                           + log_H_i[j, :S_max, z[jp1]]));
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * As js_me_rng() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_me2_rng(tuple(vector, vector, matrix, vector, array[] matrix, matrix) lp,
+             data array[,] int y, data array[,] int f_l, array[,] matrix log_H, 
+             array[] matrix logit_p, array[,] matrix log_E, data int I_aug) {
+  int I = size(lp.1), Ip1 = I + 1, J = rows(lp.3), Jm1 = J - 1,
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  matrix[S, J] logit_p_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  array[J] matrix[S, S] log_E_i;
+  array[J] int y_i;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, 
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = categorical_rng(softmax(lp.5[i, :, b]));
+    y_i[:l] = y[i, :l];
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    log_1mp[:S] = log1m_inv_logit(logit_p_i);
+    log_E_i[f:l] = log_E[i, f:l];
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+      Omega[a, b] = 0;
+      for (j in bp1:l) {
+        int jm1 = j - 1, y_j = y_i[j];
+        Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                       + log_1mp[:S, j];
+        if (y_j) {
+          Omega[:S, j] += logit_p_i[:, j] + log_E_i[j, :, y_j];
+        }
+      }
+      Omega[Sp1, l] = negative_infinity();
+      for (j in lp1:J) {
+        int jm1 = j - 1;
+        Omega[:, j] = log_prod_exp(log_H_i[jm1]', Omega[:, jm1]) 
+                      + log_1mp[:, j];
+      }
+      z[J] = categorical_rng(softmax(Omega[:, J]));
+      if (z[J] <= S) {
+        last_alive = J;
+      }
+      if (b < Jm1) {
+        int JJ = Jm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+        for (j in reverse(idx)) {
+          int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+          z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]));
+          if (z[j] <= S && z[jp1] == Sp1) {
+            last_alive = j;
+          }
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  log_H_i = log_H[Ip1];
+  log_1mp[:S] = log1m_inv_logit(logit_p[Ip1]);
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega[b, a, :, bp1] = log_H_i[b, a]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, a, :, jp1] = log_prod_exp(log_H_i[j]', Omega[b, a, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b,
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * Robust design multievent Jolly-Seber population sizes, number of entries and 
+ * exits, and super-population using the forward-backward sampling algorithm. 
+ * Function is overloaded:
+ *  1. log_P and logit_p per survey/secondary
+ *  2. log_P and logit_p per individual and survey/secondary
+ * 
+ * @param lp       Output of js_ms_rd()
+ * @param y        Detection history [I, J, K_max]
+ * @param f_l      First and last survey detected [I, 2]
+ * @param log_H    Log transition matrices [(I, )J - 1, S + 1, S + 1]
+ * @param logit_p  Detection logits [(I, )J, S, K_max]
+ * @param log_E    Log event matrix [(I, )J, K_max, S, S]
+ * @param I_aug    Number of augmented individuals
+ 
+ * @return N        Population sizes [S, J]
+ * @return B        Number of entries [S, J]
+ * @return D        Number of exits [S, J]
+ * @return N_super  Super-population
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_me_rd_rng(tuple(vector, vector, matrix, vector, array[] matrix, matrix) lp,
+               data array[,,] int y, data array[,] int f_l, data array[] int K,
+               array[] matrix log_H, array[] matrix logit_p,
+               array[,] matrix log_E, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1]), S = Sp1 - 1;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p[j, s, :K_j]));
+    }
+  }
+  array[J, K_max] int y_i;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, 
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = categorical_rng(softmax(lp.5[i, :, b]));
+    y_i[:l] = y[i, :l];
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+      Omega[a, b] = 0;
+      for (j in bp1:l) {
+        int jm1 = j - 1;
+        Omega[:S, j] = log_prod_exp(log_H[jm1, :S, :S]', Omega[:S, jm1])
+                       + log_1mp[:S, j];
+        for (k in 1:K[j]) {
+          int y_k = y_i[j, k];
+          if (y_k) {
+            Omega[:S, j] += logit_p[j, :, k] + log_E[j, k, :, y_k];
+          }
+        }
+      }
+      Omega[Sp1, l] = negative_infinity();
+      for (j in lp1:J) {
+        int jm1 = j - 1;
+        Omega[:, j] = log_prod_exp(log_H[jm1]', Omega[:, jm1]) 
+                      + log_1mp[:, j];
+      }
+      z[J] = categorical_rng(softmax(Omega[:, J]));
+      if (z[J] <= S) {
+        last_alive = J;
+      }
+      if (b < Jm1) {
+        int JJ = Jm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+        for (j in reverse(idx)) {
+          int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+          z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                         + log_H[j, :S_max, z[jp1]]));
+          if (z[j] <= S && z[jp1] == Sp1) {
+            last_alive = j;
+          }
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega[b, a, :, bp1] = log_H[b, a]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, a, :, jp1] = log_prod_exp(log_H[j]', Omega[b, a, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b,
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j]
+                                         + log_H[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_me_rd_rng(tuple(vector, matrix, matrix, matrix, array[] matrix, 
+                     array[] matrix) lp, data array[,,] int y, 
+               data array[,] int f_l, data array[] int K, array[,] matrix log_H, 
+               array[,] matrix logit_p, array[,,] matrix log_E, data int I_aug) {
+  int I = size(lp.1), J = rows(lp.3), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  array[J, K_max] matrix[S, S] log_E_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J), Omega;
+  array[J, K_max] int y_i;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, 
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = categorical_rng(softmax(lp.5[i, :, b]));
+    y_i[:l] = y[i, :l];
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    log_E_i[f:l] = log_E[i, f:l];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    if (b < J) {
+      Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+      Omega[a, b] = 0;
+      for (j in bp1:l) {
+        int jm1 = j - 1;
+        Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                       + log_1mp[:S, j];
+        for (k in 1:K[j]) {
+          int y_k = y_i[j, k];
+          if (y_k) {
+            Omega[:S, j] += logit_p_i[j, :, k] + log_E_i[j, k, :, y_k];
+          }
+        }
+      }
+      Omega[Sp1, l] = negative_infinity();
+      for (j in lp1:J) {
+        int jm1 = j - 1;
+        Omega[:, j] = log_prod_exp(log_H_i[jm1]', Omega[:, jm1]) 
+                      + log_1mp[:, j];
+      }
+      z[J] = categorical_rng(softmax(Omega[:, J]));
+      if (z[J] <= S) {
+        last_alive = J;
+      }
+      if (b < Jm1) {
+        int JJ = Jm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+        for (j in reverse(idx)) {
+          int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+          z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]));
+          if (z[j] <= S && z[jp1] == Sp1) {
+            last_alive = j;
+          }
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  for (i in 1:I_aug) {
+    int ii = I + i;
+    if (categorical_logit_rng(lp.2[:, i]) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4[:, i]), bp1 = b + 1, last_alive = b, 
+          a = categorical_logit_rng(lp.6[i, :, b]);
+      log_H_i = log_H[ii];
+      logit_p_i = logit_p[ii];
+      for (j in 1:J) {
+        int K_j = K[j];
+        for (s in 1:S) {
+          log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+        }
+      }
+      if (b < J) {
+        Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+        Omega[a, b] = 0;
+        for (j in bp1:J) {
+          int jm1 = j - 1;
+          Omega[:, j] = log_prod_exp(log_H_i[jm1]', Omega[:, jm1])
+                        + log_1mp[:, j];
+        }
+        z[J] = categorical_rng(softmax(Omega[:, J]));
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                           + log_H_i[j, :S_max, z[jp1]]));
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
+
+/** 
+ * As js_me_rd_rng() version (2) but with a single log likelihood computation for an 
+ * augmented individual.
+ */
+tuple(array[,] int, array[,] int, array[,] int, int)
+  js_me_rd2_rng(tuple(vector, vector, matrix, vector, array[] matrix, 
+                      matrix) lp, data array[,,] int y, 
+                data array[,] int f_l, data array[] int K, 
+                array[,] matrix log_H, array[,] matrix logit_p, 
+                array[,,] matrix log_E, data int I_aug) {
+  int I = size(lp.1), Ip1 = I + 1, J = rows(lp.3), Jm1 = J - 1, K_max = max(K), 
+      Sp1 = rows(log_H[1, 1]), S = Sp1 - 1;
+  array[Jm1] matrix[Sp1, Sp1] log_H_i;
+  array[J] matrix[S, K_max] logit_p_i;
+  matrix[Sp1, J] log_1mp = rep_matrix(0, Sp1, J);
+  array[J, K_max] matrix[S, S] log_E_i;
+  array[J, K_max] int y_i;
+  array[J] int z;
+  array[S, J] int N = rep_array(0, S, J), B = rep_array(0, S, J),
+                  D = rep_array(0, S, J);
+  for (i in 1:I) {
+    int f = f_l[i, 1], l = f_l[i, 2], fm1 = f - 1, fp1 = f + 1, lm1 = l - 1,
+        lp1 = l + 1, last_alive = l, 
+        b = f == 1 ? 1 : categorical_logit_rng(lp.3[:f, i]), bp1 = b + 1,
+        a = categorical_rng(softmax(lp.5[i, :, b]));
+    y_i[:l] = y[i, :l];
+    log_H_i = log_H[i];
+    logit_p_i = logit_p[i];
+    for (j in 1:J) {
+      int K_j = K[j];
+      for (s in 1:S) {
+        log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+      }
+    }
+    log_E_i[f:l] = log_E[i, f:l];
+    matrix[Sp1, J] Omega;
+    if (b < J) {
+      Omega[:, b] = rep_vector(negative_infinity(), Sp1);
+      Omega[a, b] = 0;
+      for (j in bp1:l) {
+        int jm1 = j - 1;
+        Omega[:S, j] = log_prod_exp(log_H_i[jm1, :S, :S]', Omega[:S, jm1])
+                       + log_1mp[:S, j];
+        for (k in 1:K[j]) {
+          int y_k = y_i[j, k];
+          if (y_k) {
+            Omega[:S, j] += logit_p_i[j, :, k] + log_E_i[j, k, :, y_k];
+          }
+        }
+      }
+      Omega[Sp1, l] = negative_infinity();
+      for (j in lp1:J) {
+        int jm1 = j - 1;
+        Omega[:, j] = log_prod_exp(log_H_i[jm1]', Omega[:, jm1]) 
+                      + log_1mp[:, j];
+      }
+      z[J] = categorical_rng(softmax(Omega[:, J]));
+      if (z[J] <= S) {
+        last_alive = J;
+      }
+      if (b < Jm1) {
+        int JJ = Jm1 - b;
+        array[JJ] int idx = linspaced_int_array(JJ, bp1, Jm1);
+        for (j in reverse(idx)) {
+          int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+          z[j] = categorical_rng(softmax(Omega[:S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]));
+          if (z[j] <= S && z[jp1] == Sp1) {
+            last_alive = j;
+          }
+        }
+      }
+    }
+    z[b] = a;
+    B[a, b] += 1;
+    for (j in b:last_alive) {
+      N[z[j], j] += 1;
+    }
+    if (last_alive < J) {
+      D[z[last_alive], last_alive + 1] += 1;
+    }
+  }
+  int N_super = I;
+  log_H_i = log_H[Ip1];
+  logit_p_i = logit_p[Ip1];
+  for (j in 1:J) {
+    int K_j = K[j];
+    for (s in 1:S) {
+      log_1mp[s, j] = sum(log1m_inv_logit(logit_p_i[j, s, :K_j]));
+    }
+  }
+  array[J, S] matrix[Sp1, J] Omega;
+  for (b in 1:Jm1) {
+    int bp1 = b + 1;
+    for (a in 1:S) {
+      Omega[b, a, :, bp1] = log_H_i[b, a]' + log_1mp[:, bp1];
+      for (j in bp1:Jm1) {
+        int jp1 = j + 1;
+        Omega[b, a, :, jp1] = log_prod_exp(log_H_i[j]', Omega[b, a, :, j])
+                              + log_1mp[:, jp1];
+      }
+    }
+  }
+  for (i in 1:I_aug) {
+    if (categorical_logit_rng(lp.2) == 2) {
+      N_super += 1;
+      int b = categorical_logit_rng(lp.4), last_alive = b,
+          a = categorical_logit_rng(lp.6[:, b]);
+      if (b < J) {
+        z[J] = categorical_logit_rng(Omega[b, a, :, J]);
+        if (z[J] <= S) {
+          last_alive = J;
+        }
+        if (b < Jm1) {
+          int JJ = Jm1 - b;
+          array[JJ] int idx = linspaced_int_array(JJ, b + 1, Jm1);
+          for (j in reverse(idx)) {
+            int jp1 = j + 1, S_max = last_alive >= jp1 ? S : Sp1;
+            z[j] = categorical_logit_rng(Omega[b, a, :S_max, j]
+                                         + log_H_i[j, :S_max, z[jp1]]);
+            if (z[j] <= S && z[jp1] == Sp1) {
+              last_alive = j;
+            }
+          }
+        }
+      }
+      z[b] = a;
+      B[a, b] += 1;
+      for (j in b:last_alive) {
+        N[z[j], j] += 1;
+      }
+      if (last_alive < J) {
+        D[z[last_alive], last_alive + 1] += 1;
+      }
+    }
+  }
+  if (N_super == I + I_aug) {
+    print("N_super = I + I_aug. Increase I_aug and try again.");
+  }
+  return (N, B, D, N_super);
+}
